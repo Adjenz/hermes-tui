@@ -118,3 +118,11 @@ htui --help       # Show CLI help
 | `/` + `Tab` | Slash-command autocomplete |
 | `Esc` | Cancel active turn or close modal |
 | `Ctrl+C` | Quit |
+
+---
+
+## Contributors
+
+- **Adjenz** — Creator & maintainer
+- **Gemini** — Architecture, UI/UX, and implementation
+- **Claude** — Performance optimization, features, and polish
