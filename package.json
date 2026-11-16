@@ -1,0 +1,19 @@
+{
+  "name": "hermes-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "gemini-cli style React Ink TUI for Hermes agents via Paseo",
+  "scripts": {
+    "start": "tsx src/index.tsx"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "ink": "^5.1.0",
+    "react": "^18.3.1",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12"
+  }
+}
