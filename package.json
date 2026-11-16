@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "gemini-cli style React Ink TUI for Hermes agents via Paseo",
+  "description": "Modern React + Ink TUI for Hermes Agent with remote control via the Paseo daemon",
+  "bin": {
+    "htui": "./bin/htui.mjs",
+    "hermes-tui": "./bin/htui.mjs"
+  },
   "scripts": {
     "start": "tsx src/index.tsx"
   },

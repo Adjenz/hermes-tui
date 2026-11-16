@@ -1,110 +1,120 @@
 # hermes-tui (`htui`)
 
-Une vraie TUI moderne (React + Ink) pour remplacer l'interface terminal d'origine d'**Hermes Agent**, avec **contrôle à distance** natif via SSH et le daemon **Paseo**.
+A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s default TUI — with native **remote control** over SSH powered by the **Paseo** daemon.
 
-> Pilotez vos agents Hermes hébergés sur un serveur distant (ou en local) depuis un terminal fluide, multi-sessions, avec rendu Markdown soigné, blocs d'outils repliables et synchronisation en temps réel avec Paseo Desktop/Mobile.
+> Run your Hermes agents continuously on a remote server (or locally) via Paseo, and control every session from a fast, multi-tab terminal interface synchronized in real time with Paseo Desktop & Mobile.
 
 ---
 
-## Pourquoi `hermes-tui` ?
+## Why `hermes-tui`?
 
-- **Remplacer la TUI d'origine d'Hermes** par une interface épurée, inspirée d'`agy` / `opencode` : couleurs adaptatives au thème du terminal, tableaux alignés, blocs de code encadrés, listes propres sans rognage.
-- **Remote control via le daemon Paseo :** vos agents tournent en continu sur votre serveur (`hermes` + `paseo`). Vous vous connectez en SSH depuis votre poste local sans perdre vos sessions en cours, et vous retrouvez le même état en temps réel partout.
-- **Multi-sessions instantané :** onglets groupés par agent tout en haut de la fenêtre, cliquables à la souris, avec badges d'état :
-  - `⠋` **orange** : en cours d'exécution (*working*)
-  - `●` **vert** : tour terminé (*terminé*)
-  - `○` **discret** : en attente (*idle*)
-- **Appels d'outils propres (`Ctrl+O`) :** les appels consécutifs (`Bash`, `Edit`, `Read`, `Memory`, etc.) sont regroupés et repliés par défaut (`● Bash(…) (ctrl+o to expand)`), puis dépliables instantanément.
-- **Expérience terminal soignée :**
-  - Sélection souris avec **copie automatique au relâcher** (`wl-copy` + `OSC 52`).
-  - Défilement à la **molette** ou `PgUp`/`PgDn`.
-  - Envoi d'**images, PDF et fichiers** depuis le presse-papiers avec `Ctrl+V` (ou collage de chemin / URI `file://`).
-  - Sélecteurs interactifs de **modèle/provider** (`Ctrl+L`), **thinking** (`Ctrl+T`), **mode d'approbation** (`/mode`) et **sessions** (`Ctrl+S` / `Ctrl+A`).
-  - Autocomplétion des **commandes slash** (`/`) et archivage de session (`/archive`).
+- **A real TUI replacement for Hermes:** clean, `agy` / `opencode`-inspired layout with theme-adaptive terminal colors, Unicode Markdown tables, framed code blocks, wrapped lists, and zero text clipping.
+- **Native Remote Control via Paseo:** your agents stay alive on your server under the Paseo daemon (`~/.paseo`). Connect from any workstation over SSH without losing state or active turns, and switch seamlessly between `htui` and Paseo Desktop/Mobile.
+- **Multi-session tab bar at the top:** sessions grouped by agent, clickable directly with the mouse, with live status badges:
+  - `⠋` **orange**: running (*working*)
+  - `●` **green**: turn finished (*terminé*)
+  - `○` **dim**: waiting (*idle*)
+- **Clean collapsible tool calls (`Ctrl+O`):** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), and expand/collapse instantly.
+- **Modern terminal ergonomics:**
+  - Mouse drag selection with **auto-copy on release** (`wl-copy` + `OSC 52`).
+  - Mouse wheel and `PgUp`/`PgDn` scrolling.
+  - Clipboard **image, PDF, and file attachments** via `Ctrl+V` (or pasted path / `file://` URI).
+  - Interactive pickers for **models/providers** (`Ctrl+L`), **thinking level** (`Ctrl+T`), **approval mode** (`/mode`), and **sessions** (`Ctrl+S` / `Ctrl+A`).
+  - Slash-command autocomplete (`/`) and session archiving (`/archive`).
 
 ---
 
 ## Architecture
 
 ```
-[ Poste local: hermes-tui (htui) ]
-        │  NDJSON sur stdin/stdout (local ou SSH BatchMode)
+[ Workstation: hermes-tui (htui) ]
+        │  NDJSON over stdin/stdout (local or SSH BatchMode)
         ▼
-[ Serveur / Local: bridge/hermes-paseo-bridge.mjs ]
+[ Host: bridge/hermes-paseo-bridge.mjs ]
         │  @getpaseo/cli client (connectToDaemon)
         ▼
-[ Daemon Paseo (~/.paseo) ] ──► [ Agents Hermes ACP ]
+[ Paseo Daemon (~/.paseo) ] ──► [ Hermes ACP Agents ]
 ```
 
-- `src/index.tsx` : Interface TUI React + Ink, gestion souris SGR, presse-papiers, onglets, modales.
-- `src/markdown.tsx` : Rendu Markdown terminal (tableaux Unicode, blocs de code, titres, listes, liens, wrap ANSI).
-- `src/types.ts` : Types TypeScript partagés.
-- `bridge/hermes-paseo-bridge.mjs` : Pont NDJSON léger reliant la TUI au daemon Paseo local ou distant.
+- `bin/htui.mjs` — CLI entrypoint (`htui` / `hermes-tui`).
+- `src/index.tsx` — React + Ink TUI, SGR mouse & drag-selection handling, clipboard attachments, modals.
+- `src/markdown.tsx` — Terminal Markdown renderer (tables, fenced code blocks, headings, lists, links, ANSI-aware wrapping).
+- `src/types.ts` — Shared TypeScript types.
+- `bridge/hermes-paseo-bridge.mjs` — Lightweight NDJSON bridge talking to the Paseo daemon.
 
 ---
 
 ## Installation
 
-### 1. Sur le poste client
+### Local (same machine as Paseo)
 
 ```bash
 git clone git@github.com:Adjenz/hermes-tui.git
 cd hermes-tui
 npm install
+npm link        # exposes `htui` and `hermes-tui` globally
+htui --check
 ```
 
-### 2. Sur le serveur hébergeant Paseo + Hermes (pour le remote control)
+### Remote Control (SSH to a Paseo + Hermes server)
 
-Copiez le pont sur la machine distante :
+1. **On your workstation:**
+   ```bash
+   git clone git@github.com:Adjenz/hermes-tui.git
+   cd hermes-tui
+   npm install
+   npm link
+   ```
+2. **On your server (where Paseo + Hermes run):**
+   ```bash
+   scp bridge/hermes-paseo-bridge.mjs user@your-server:~/.local/bin/hermes-paseo-bridge.mjs
+   ```
+3. **Configure the target host** (e.g. in `~/.bashrc` / `~/.zshrc` or a wrapper):
+   ```bash
+   export HERMES_TUI_HOST="user@your-server"
+   htui --check
+   ```
 
-```bash
-scp bridge/hermes-paseo-bridge.mjs user@votre-serveur:~/.local/bin/hermes-paseo-bridge.mjs
-```
+### Requirements
 
-> Prérequis côté serveur : Node.js, `@getpaseo/cli` installé et le daemon Paseo démarré (`~/.paseo`).
-> Côté client (Linux/Wayland) : `wl-clipboard` (`wl-paste` / `wl-copy`) pour les pièces jointes et la copie presse-papiers.
-
-### 3. Configuration (variables d'environnement)
-
-| Variable | Description | Défaut |
-|---|---|---|
-| `HERMES_TUI_HOST` | Cible SSH (`user@serveur`). Si vide, lance le pont en local. | *(vide = local)* |
-| `HERMES_TUI_BRIDGE_PATH` | Chemin vers `hermes-paseo-bridge.mjs` sur la cible. | `~/.local/bin/hermes-paseo-bridge.mjs` (SSH) ou local |
-| `PASEO_HOME` | Répertoire du daemon Paseo côté serveur. | `~/.paseo` |
-| `PASEO_CLIENT_PATH` | Chemin explicite vers `@getpaseo/cli/dist/utils/client.js`. | Détection automatique |
-
-Exemple de wrapper `~/.local/bin/htui` :
-
-```sh
-#!/bin/sh
-export HERMES_TUI_HOST="user@mon-serveur"
-exec /chemin/vers/hermes-tui/node_modules/.bin/tsx /chemin/vers/hermes-tui/src/index.tsx "$@"
-```
+- **Client:** Node.js ≥ 18; on Linux/Wayland, `wl-clipboard` (`wl-paste` / `wl-copy`) for `Ctrl+V` file/image attachments and clipboard copy (`OSC 52` is also emitted as fallback).
+- **Host running Paseo:** Node.js, `@getpaseo/cli` installed, and the Paseo daemon running (`~/.paseo`).
 
 ---
 
-## Utilisation & Raccourcis
+## Configuration
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `HERMES_TUI_HOST` | SSH target (`user@host`). If unset/empty, runs the bridge locally. | *(empty = local)* |
+| `HERMES_TUI_BRIDGE_PATH` | Path to `hermes-paseo-bridge.mjs` on the target host. | `~/.local/bin/hermes-paseo-bridge.mjs` (SSH) or local |
+| `PASEO_HOME` | Paseo daemon home directory on the host. | `~/.paseo` |
+| `PASEO_CLIENT_PATH` | Explicit path to `@getpaseo/cli/dist/utils/client.js`. | Auto-detected (common paths + `npm root -g`) |
+
+---
+
+## Usage & Shortcuts
 
 ```bash
-htui            # Lance la TUI
-htui mon-agent  # Cible directement une session par nom ou préfixe d'ID
-htui --check    # Vérifie la connexion au pont Paseo et liste les stats
-htui --help     # Affiche l'aide
+htui              # Launch the TUI
+htui my-agent     # Jump directly to a session by name or ID prefix
+htui --check      # Test connection to the Paseo bridge
+htui --help       # Show CLI help
 ```
 
-| Raccourci | Action |
+| Shortcut | Action |
 |---|---|
-| Clic sur onglet (en haut) | Changer de session |
-| Clic-glisser dans la discussion | Sélectionner + copier automatiquement au relâcher |
-| Molette / `PgUp` / `PgDn` | Faire défiler l'historique |
-| `Ctrl+O` | Déplier / replier les appels d'outils |
-| `Ctrl+V` | Joindre une image / PDF / fichier du presse-papiers (ou coller du texte) |
-| `Ctrl+S` / `Ctrl+A` / `/sessions` | Menu complet des sessions avec filtre |
-| `Ctrl+N` / `Ctrl+P` | Session suivante / précédente |
-| `Ctrl+L` / `/model` | Changer de modèle / provider |
-| `Ctrl+T` / `/thinking` | Changer le niveau de thinking |
-| `/mode` | Changer le mode d'approbation (`default`, `accept_edits`, `dont_ask`) |
-| `/archive` | Archiver la session courante |
-| `/` + `Tab` | Autocomplétion des commandes slash |
-| `Esc` | Annuler le tour en cours ou fermer un menu |
-| `Ctrl+C` | Quitter |
+| Click a tab (top bar) | Switch to that session |
+| Mouse drag in chat | Select text & auto-copy on release |
+| Mouse wheel / `PgUp` / `PgDn` | Scroll conversation history |
+| `Ctrl+O` | Expand / collapse tool call details |
+| `Ctrl+V` | Attach clipboard image / PDF / file (or paste text) |
+| `Ctrl+S` / `Ctrl+A` / `/sessions` | Open full session picker with search & badges |
+| `Ctrl+N` / `Ctrl+P` | Next / previous session |
+| `Ctrl+L` / `/model` | Switch LLM model / provider |
+| `Ctrl+T` / `/thinking` | Change thinking level |
+| `/mode` | Change approval mode (`default`, `accept_edits`, `dont_ask`) |
+| `/archive` | Archive the current session |
+| `/` + `Tab` | Slash-command autocomplete |
+| `Esc` | Cancel active turn or close modal |
+| `Ctrl+C` | Quit |

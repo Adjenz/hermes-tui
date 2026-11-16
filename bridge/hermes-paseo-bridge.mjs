@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import readline from "node:readline";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,15 @@ async function loadConnectToDaemon() {
     "/usr/local/lib/node_modules/@getpaseo/cli/dist/utils/client.js",
     "/usr/lib/node_modules/@getpaseo/cli/dist/utils/client.js",
   ].filter(Boolean);
+
+  try {
+    const npmRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8", timeout: 3000 }).trim();
+    if (npmRoot) {
+      candidates.push(path.join(npmRoot, "@getpaseo/cli/dist/utils/client.js"));
+    }
+  } catch {
+    // ignore if npm is not in PATH
+  }
 
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
