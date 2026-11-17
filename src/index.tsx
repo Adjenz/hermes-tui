@@ -2449,16 +2449,14 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const after = hasCursor && rel < l.text.length ? l.text.slice(rel + 1) : "";
             return (
               <Box key={`prompt-line-${l.idx}`} width="100%" height={1} overflow="hidden">
-                <Text color={busy ? "yellow" : "cyan"} bold>
-                  {l.idx === 0 ? "> " : "  "}
-                </Text>
-                <Box flexGrow={1} overflow="hidden">
-                  <Text wrap="truncate-end">
-                    {before}
-                    {curChar}
-                    {after}
+                <Text>
+                  <Text color={busy ? "yellow" : "cyan"} bold>
+                    {l.idx === 0 ? "> " : "  "}
                   </Text>
-                </Box>
+                  {before}
+                  {curChar}
+                  {after}
+                </Text>
               </Box>
             );
           });
