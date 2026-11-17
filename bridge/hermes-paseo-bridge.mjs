@@ -114,6 +114,8 @@ async function main() {
 
   let agentsMap = new Map();
   let cachedModels = null;
+  const cachedCommandsByAgent = new Map();
+  let fallbackCommands = [];
   let activeAgentId = null;
   let activeUnsub = null;
   let observeSub = null;
@@ -174,17 +176,42 @@ async function main() {
   }
 
   async function loadCommands(agentId, status) {
-    if (status === "closed") return [];
-    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve({ commands: [] }), 1000));
+    if (cachedCommandsByAgent.has(agentId)) return cachedCommandsByAgent.get(agentId);
+    if (status === "closed") return fallbackCommands;
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve({ commands: [] }), 600));
     const res = await Promise.race([
       client.listCommands({ agentId }).catch(() => ({ commands: [] })),
       timeoutPromise,
     ]);
-    return (res?.commands ?? []).map((c) => ({
+    const list = (res?.commands ?? []).map((c) => ({
       name: c.name,
       description: c.description ?? "",
       argumentHint: c.argumentHint ?? "",
     }));
+    if (list.length > 0) {
+      cachedCommandsByAgent.set(agentId, list);
+      if (fallbackCommands.length === 0) fallbackCommands = list;
+      return list;
+    }
+    return fallbackCommands;
+  }
+
+  async function runPrefetch(agentIds) {
+    const ids = Array.isArray(agentIds) ? agentIds.filter((id) => typeof id === "string" && id.length > 0) : [];
+    const queue = [...ids];
+    const workers = Array.from({ length: Math.min(2, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const id = queue.shift();
+        if (!id) continue;
+        try {
+          const timeline = await loadTimeline(id);
+          emit({ type: "timeline_prefetched", agentId: id, timeline });
+        } catch {
+          // ignore background prefetch failures
+        }
+      }
+    });
+    await Promise.all(workers);
   }
 
   async function subscribeToAgent(agentId) {
@@ -259,11 +286,21 @@ async function main() {
       const entry = agentsMap.get(agentId);
       const status = entry ? compactAgent(entry).status : undefined;
       void subscribeToAgent(agentId);
-      const [timeline, commands] = await Promise.all([
-        loadTimeline(agentId).catch(() => []),
-        loadCommands(agentId, status),
-      ]);
-      emit({ type: "agent_switched", agentId, timeline, commands });
+      const hasImmediateCmds = cachedCommandsByAgent.has(agentId) || fallbackCommands.length > 0;
+      if (hasImmediateCmds) {
+        const timeline = await loadTimeline(agentId).catch(() => []);
+        const commands = cachedCommandsByAgent.get(agentId) ?? fallbackCommands;
+        emit({ type: "agent_switched", agentId, timeline, commands });
+        if (!cachedCommandsByAgent.has(agentId) && status !== "closed") {
+          void loadCommands(agentId, status);
+        }
+      } else {
+        const [timeline, commands] = await Promise.all([
+          loadTimeline(agentId).catch(() => []),
+          loadCommands(agentId, status),
+        ]);
+        emit({ type: "agent_switched", agentId, timeline, commands });
+      }
       return;
     }
 
@@ -421,10 +458,19 @@ async function main() {
   rl.on("line", (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
+    let parsed = null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (parsed?.cmd === "prefetch_timelines") {
+      void runPrefetch(parsed.agentIds);
+      return;
+    }
     chain = chain.then(async () => {
       try {
-        const msg = JSON.parse(trimmed);
-        await handleCommand(msg);
+        await handleCommand(parsed);
       } catch (err) {
         emit({ type: "error", message: String(err?.message || err) });
       }

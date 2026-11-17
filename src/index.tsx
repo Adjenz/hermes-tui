@@ -783,6 +783,20 @@ interface LiveTool {
   status: string;
 }
 
+interface CachedSession {
+  entries: StaticEntry[];
+  commands: SlashCommand[];
+  fingerprint: string;
+  updatedAt: string;
+}
+
+function timelineFingerprint(items: TimelineItem[]): string {
+  const len = items.length;
+  if (len === 0) return "0";
+  const last = items[len - 1];
+  return `${len}:${last?.type ?? ""}:${last?.callId ?? last?.messageId ?? ""}:${(last?.text ?? last?.message ?? "").slice(-48)}`;
+}
+
 interface AppProps {
   initialQuery?: string;
 }
@@ -846,6 +860,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const [showDetails, setShowDetails] = useState(false);
   const [completedAgentIds, setCompletedAgentIds] = useState<Set<string>>(() => new Set());
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
+  const timelineCacheRef = useRef<Map<string, CachedSession>>(new Map());
 
   const activeAgent = useMemo(
     () => agents.find((a) => a.id === activeAgentId),
@@ -918,9 +933,18 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setScrollOffset(0);
 
     const entries = timelineToStaticEntries(timeline, nextEpoch);
+    const resolvedCmds = cmds.length > 0 ? cmds : FALLBACK_HERMES_COMMANDS;
+    if (agent?.id) {
+      timelineCacheRef.current.set(agent.id, {
+        entries,
+        commands: resolvedCmds,
+        fingerprint: timelineFingerprint(timeline),
+        updatedAt: agent.updatedAt ?? "",
+      });
+    }
     setSessionEpoch(nextEpoch);
     setStaticItems(entries);
-    setHermesCommands(cmds.length > 0 ? cmds : FALLBACK_HERMES_COMMANDS);
+    setHermesCommands(resolvedCmds);
   }
 
   const spinnerActive = connecting || isStreaming || agents.some((a) => a.status === "running");
@@ -1009,6 +1033,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const active = list.find((a) => a.id === chosenId);
             resetToAgentTimeline(active, msg.timeline ?? [], msg.commands ?? []);
           }
+
+          const prefetchIds = list.filter((a) => a.id !== chosenId).map((a) => a.id);
+          if (prefetchIds.length > 0) {
+            sendBridge({ cmd: "prefetch_timelines", agentIds: prefetchIds });
+          }
           return;
         }
 
@@ -1041,6 +1070,23 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           return;
         }
 
+        if (msg.type === "timeline_prefetched") {
+          const prefId: string = msg.agentId;
+          if (!prefId || prefId === activeAgentIdRef.current) return;
+          const tl: TimelineItem[] = msg.timeline ?? [];
+          const fp = timelineFingerprint(tl);
+          const existing = timelineCacheRef.current.get(prefId);
+          if (existing && existing.fingerprint === fp) return;
+          const agent = agentsRef.current.find((a) => a.id === prefId);
+          timelineCacheRef.current.set(prefId, {
+            entries: timelineToStaticEntries(tl, epochRef.current),
+            commands: existing?.commands ?? FALLBACK_HERMES_COMMANDS,
+            fingerprint: fp,
+            updatedAt: agent?.updatedAt ?? "",
+          });
+          return;
+        }
+
         if (msg.type === "agent_switched") {
           const nextId: string = msg.agentId;
           if (pendingSwitchIdRef.current && nextId !== pendingSwitchIdRef.current) {
@@ -1050,7 +1096,19 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           setActiveAgentId(nextId);
           activeAgentIdRef.current = nextId;
           const active = agentsRef.current.find((a) => a.id === nextId);
-          resetToAgentTimeline(active, msg.timeline ?? [], msg.commands ?? []);
+          const tl: TimelineItem[] = msg.timeline ?? [];
+          const cmds: SlashCommand[] = msg.commands ?? [];
+          const fp = timelineFingerprint(tl);
+          const cached = timelineCacheRef.current.get(nextId);
+          if (cached && cached.fingerprint === fp) {
+            cached.updatedAt = active?.updatedAt ?? cached.updatedAt;
+            if (cmds.length > 0) {
+              cached.commands = cmds;
+              setHermesCommands(cmds);
+            }
+          } else {
+            resetToAgentTimeline(active, tl, cmds);
+          }
           setStatusNotice(null);
           return;
         }
@@ -1281,13 +1339,22 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       if (prevId) next.delete(prevId);
       return next;
     });
-    setStaticItems([]);
+    const cached = timelineCacheRef.current.get(id);
+    if (cached) {
+      setStaticItems(cached.entries);
+      setHermesCommands(cached.commands.length > 0 ? cached.commands : FALLBACK_HERMES_COMMANDS);
+      const stale = target?.status === "running" || Boolean(target?.updatedAt && target.updatedAt !== cached.updatedAt);
+      setStatusNotice(stale ? "Synchronisation…" : null);
+    } else {
+      setStaticItems([]);
+      setStatusNotice(`Chargement de ${target?.title ?? id}…`);
+    }
     setLiveAssistant("");
     setLiveTools([]);
     setIsStreaming(target?.status === "running");
+    setIsThinking(false);
     setScrollOffset(0);
     setModal("none");
-    setStatusNotice(`Chargement de ${target?.title ?? id}…`);
     sendBridge({ cmd: "switch_agent", agentId: id });
   }
 
