@@ -277,14 +277,20 @@ function sendDesktopNotification(title: string, body: string): void {
 }
 
 const SILENCE_MARKER_RE = /^[*_`.~]*(?:\[?SILENT\]?|NO[_\s]REPLY)[*_`.~]*$/i;
+const HERMES_SILENCE_WARNING_RE = /^⚠️?\s*The model returned only a silence marker.*$/i;
 
 function filterNoReply(rawText: string): { isSilentOnly: boolean; text: string } {
-  const trimmed = rawText.trim();
+  const cleanedLines = rawText
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .filter((l) => !HERMES_SILENCE_WARNING_RE.test(l.trim()));
+  const withoutWarning = cleanedLines.join("\n");
+  const trimmed = withoutWarning.trim();
   if (!trimmed) return { isSilentOnly: false, text: rawText };
   if (SILENCE_MARKER_RE.test(trimmed)) {
     return { isSilentOnly: true, text: "" };
   }
-  const lines = rawText.replace(/\s+$/, "").split("\n");
+  const lines = withoutWarning.replace(/\s+$/, "").split("\n");
   if (lines.length >= 2 && SILENCE_MARKER_RE.test(lines[lines.length - 1].trim())) {
     lines.pop();
     const cleaned = lines.join("\n").replace(/\s+$/, "");
