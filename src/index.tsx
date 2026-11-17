@@ -193,6 +193,7 @@ const COLOR_DONE = "#22c55e"; // Vert pour "terminé"
 
 const LOCAL_COMMANDS: SlashCommand[] = [
   { name: "new", description: "Créer une nouvelle session Hermes", argumentHint: "[titre]", isLocal: true },
+  { name: "title", description: "Renommer l'onglet de session dans Paseo", argumentHint: "<titre>", isLocal: true },
   { name: "sessions", description: "Menu des onglets de session avec badges", argumentHint: "[filtre]", isLocal: true },
   { name: "agent", description: "Basculer vers un autre agent / session Hermes", argumentHint: "[filtre]", isLocal: true },
   { name: "model", description: "Choisir le modèle / provider LLM", argumentHint: "[id]", isLocal: true },
@@ -1341,6 +1342,24 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         }
         setStatusNotice("Création de la session…");
         sendBridge({ cmd: "create_agent", fromAgentId: activeAgentId, ...(finalTitle ? { title: finalTitle } : {}) });
+        return;
+      }
+      if (cmdName === "title" || cmdName === "rename") {
+        const cleanArg = arg.replace(/^["']|["']$/g, "").trim();
+        if (!cleanArg) {
+          setStatusNotice("Usage : /title <nouveau nom>");
+          return;
+        }
+        const basePersona =
+          activeAgent?.title?.split(" - ")[0]?.trim() || activeAgent?.projectName?.trim() || "";
+        const finalTitle =
+          basePersona && !cleanArg.toLowerCase().startsWith(`${basePersona.toLowerCase()} - `)
+            ? `${basePersona} - ${cleanArg}`
+            : cleanArg;
+        if (activeAgentId) {
+          setStatusNotice("Renommage de la session…");
+          sendBridge({ cmd: "rename_agent", agentId: activeAgentId, name: finalTitle });
+        }
         return;
       }
       if (cmdName === "clear") {

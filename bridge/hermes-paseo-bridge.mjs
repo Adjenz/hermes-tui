@@ -325,6 +325,16 @@ async function main() {
       return;
     }
 
+    if (cmd === "rename_agent") {
+      const agentId = msg.agentId || activeAgentId;
+      const name = String(msg.name || "").trim();
+      if (!agentId || !name) throw new Error("Missing agentId or name");
+      await client.updateAgent(agentId, { name });
+      await refreshAgentsList(true);
+      emit({ type: "notice", text: `Session renommée → ${name}` });
+      return;
+    }
+
     if (cmd === "cancel") {
       const agentId = msg.agentId || activeAgentId;
       if (!agentId) return;
