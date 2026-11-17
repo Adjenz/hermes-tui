@@ -16,7 +16,7 @@ A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s def
   - `⠋` **orange**: running (*working*)
   - `●` **green**: turn finished (*terminé*)
   - `○` **dim**: waiting (*idle*)
-- **Clean collapsible tool calls (`Ctrl+O`):** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), and expand/collapse cleanly.
+- **Clean collapsible tool calls (`Ctrl+O`) & live `Thinking…` indicator:** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), expand cleanly with single-`⎿` indentation, and reasoning shows a minimal live `Thinking…` indicator.
 - **Modern terminal ergonomics:**
   - Full prompt editing (`←`/`→`, `Home`/`End`, `Ctrl+E`, `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, and multi-line input via `Shift+Enter` / `Alt+Enter`).
   - Mouse drag selection with **auto-copy on release** (`wl-copy` + `OSC 52`).
@@ -24,7 +24,7 @@ A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s def
   - Clipboard **image, PDF, and file attachments** via `Ctrl+V` (or pasted path / `file://` URI).
   - Live **context window usage** (`used/max (%)`) in the bottom status bar.
   - Interactive pickers for **models/providers** (`Ctrl+L`), **thinking level** (`Ctrl+T`), **approval mode** (`/mode`), and **sessions** (`Ctrl+S` / `Ctrl+A`).
-  - Create (`/new [title]`) and archive (`/archive`) sessions directly from the TUI.
+  - Create (`/new [title]`), rename (`/title <name>`), reset (`/reset`), and archive (`/archive`) sessions directly from the TUI.
 
 ---
 
