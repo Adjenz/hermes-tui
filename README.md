@@ -4,23 +4,27 @@ A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s def
 
 > Run your Hermes agents continuously on a remote server (or locally) via Paseo, and control every session from a fast, multi-tab terminal interface synchronized in real time with Paseo Desktop & Mobile.
 
+![hermes-tui preview](assets/preview.png)
+
 ---
 
 ## Why `hermes-tui`?
 
 - **A real TUI replacement for Hermes:** clean, `agy` / `opencode`-inspired layout with theme-adaptive terminal colors, Unicode Markdown tables, framed code blocks, wrapped lists, and zero text clipping.
-- **Native Remote Control via Paseo:** your agents stay alive on your server under the Paseo daemon (`~/.paseo`). Connect from any workstation over SSH without losing state or active turns, and switch seamlessly between `htui` and Paseo Desktop/Mobile.
+- **Native Remote Control via Paseo:** your agents stay alive on your server under the Paseo daemon (`~/.paseo`). Connect from any workstation over SSH with automatic reconnect after sleep or network drops, and stay synchronized in real time with Paseo Desktop/Mobile.
 - **Multi-session tab bar at the top:** sessions grouped by agent, clickable directly with the mouse, with live status badges:
   - `⠋` **orange**: running (*working*)
   - `●` **green**: turn finished (*terminé*)
   - `○` **dim**: waiting (*idle*)
-- **Clean collapsible tool calls (`Ctrl+O`):** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), and expand/collapse instantly.
+- **Clean collapsible tool calls (`Ctrl+O`):** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), and expand/collapse cleanly.
 - **Modern terminal ergonomics:**
+  - Full prompt editing (`←`/`→`, `Home`/`End`, `Ctrl+E`, `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, and multi-line input via `Shift+Enter` / `Alt+Enter`).
   - Mouse drag selection with **auto-copy on release** (`wl-copy` + `OSC 52`).
   - Mouse wheel and `PgUp`/`PgDn` scrolling.
   - Clipboard **image, PDF, and file attachments** via `Ctrl+V` (or pasted path / `file://` URI).
+  - Live **context window usage** (`used/max (%)`) in the bottom status bar.
   - Interactive pickers for **models/providers** (`Ctrl+L`), **thinking level** (`Ctrl+T`), **approval mode** (`/mode`), and **sessions** (`Ctrl+S` / `Ctrl+A`).
-  - Slash-command autocomplete (`/`) and session archiving (`/archive`).
+  - Create (`/new [title]`) and archive (`/archive`) sessions directly from the TUI.
 
 ---
 
@@ -114,7 +118,10 @@ htui --help       # Show CLI help
 | `Ctrl+L` / `/model` | Switch LLM model / provider |
 | `Ctrl+T` / `/thinking` | Change thinking level |
 | `/mode` | Change approval mode (`default`, `accept_edits`, `dont_ask`) |
+| `/new [title]` | Create a new Hermes session |
 | `/archive` | Archive the current session |
+| `←`/`→`, `Home`/`End`, `Ctrl+W`/`U`/`K` | Move cursor & edit prompt |
+| `Shift+Enter` / `Alt+Enter` | Insert a newline in the prompt |
 | `/` + `Tab` | Slash-command autocomplete |
 | `Esc` | Cancel active turn or close modal |
 | `Ctrl+C` | Quit |

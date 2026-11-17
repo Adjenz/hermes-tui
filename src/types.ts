@@ -41,6 +41,7 @@ export interface HermesAgent {
   thinkingOptionId: string | null;
   updatedAt: string;
   requiresAttention: boolean;
+  workspaceId?: string | null;
   lastUsage?: AgentUsage | null;
 }
 

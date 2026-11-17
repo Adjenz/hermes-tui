@@ -33,7 +33,7 @@ const LOCAL_BRIDGE_PATH = path.resolve(__dirname, "../bridge/hermes-paseo-bridge
 const REMOTE_HOST = (process.env.HERMES_TUI_HOST || "").trim();
 const REMOTE_BRIDGE_PATH = (process.env.HERMES_TUI_BRIDGE_PATH || "~/.local/bin/hermes-paseo-bridge.mjs").trim();
 const BRIDGE_CMD = REMOTE_HOST
-  ? ["ssh", "-T", "-o", "BatchMode=yes", REMOTE_HOST, "node", REMOTE_BRIDGE_PATH]
+  ? ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2", REMOTE_HOST, "node", REMOTE_BRIDGE_PATH]
   : ["node", process.env.HERMES_TUI_BRIDGE_PATH || LOCAL_BRIDGE_PATH];
 const TARGET_LABEL = REMOTE_HOST || "local";
 interface PendingAttachment {
@@ -192,6 +192,7 @@ const COLOR_WORKING = "#f97316"; // Orange pour "working"
 const COLOR_DONE = "#22c55e"; // Vert pour "terminé"
 
 const LOCAL_COMMANDS: SlashCommand[] = [
+  { name: "new", description: "Créer une nouvelle session Hermes", argumentHint: "[titre]", isLocal: true },
   { name: "sessions", description: "Menu des onglets de session avec badges", argumentHint: "[filtre]", isLocal: true },
   { name: "agent", description: "Basculer vers un autre agent / session Hermes", argumentHint: "[filtre]", isLocal: true },
   { name: "model", description: "Choisir le modèle / provider LLM", argumentHint: "[id]", isLocal: true },
@@ -805,6 +806,14 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const [input, setInput] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const inputRef = useRef("");
+  const cursorRef = useRef(0);
+  inputRef.current = input;
+  cursorRef.current = cursor;
+  const intentionalCloseRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectDelayRef = useRef(1500);
   const [promptHistory, setPromptHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState<number>(-1);
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -914,237 +923,264 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   }, [spinnerActive]);
 
   useEffect(() => {
-    const proc = spawnBridge();
-    bridgeRef.current = proc;
+    intentionalCloseRef.current = false;
 
-    const rl = readline.createInterface({ input: proc.stdout });
-    proc.stderr.on("data", (chunk) => {
-      const msg = chunk.toString().trim();
-      if (msg) {
-        setStatusNotice(msg.split("\n")[0]);
-      }
-    });
+    const connectBridge = () => {
+      if (intentionalCloseRef.current) return;
+      const proc = spawnBridge();
+      bridgeRef.current = proc;
 
-    rl.on("line", (line) => {
-      let msg: any;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        return;
-      }
-
-      if (msg.type === "init_ok") {
-        const list: HermesAgent[] = msg.agents ?? [];
-        setAgents(list);
-        setModels(msg.models ?? []);
-        const nextStatuses = new Map<string, string>();
-        for (const a of list) {
-          nextStatuses.set(a.id, a.status);
+      const rl = readline.createInterface({ input: proc.stdout });
+      proc.stderr.on("data", (chunk) => {
+        const msg = chunk.toString().trim();
+        if (msg) {
+          setStatusNotice(msg.split("\n")[0]);
         }
-        prevStatusesRef.current = nextStatuses;
-        // Start with clean badges: only "running" shows orange; completed is recorded dynamically when a job finishes.
-        setCompletedAgentIds(new Set());
+      });
 
-        let chosenId: string | null = msg.activeAgentId ?? list[0]?.id ?? null;
-        if (initialQuery) {
-          const q = initialQuery.toLowerCase();
-          const match = list.find(
-            (a) =>
-              a.id.toLowerCase().startsWith(q) ||
-              a.title.toLowerCase().includes(q) ||
-              a.projectName.toLowerCase().includes(q)
-          );
-          if (match) chosenId = match.id;
+      proc.on("exit", () => {
+        if (bridgeRef.current !== proc || intentionalCloseRef.current) return;
+        bridgeRef.current = null;
+        setConnecting(true);
+        setIsStreaming(false);
+        const delay = reconnectDelayRef.current;
+        reconnectDelayRef.current = Math.min(5000, Math.round(delay * 1.5));
+        setStatusNotice(`Connexion perdue — reconnexion dans ${Math.round(delay / 1000)}s…`);
+        reconnectTimerRef.current = setTimeout(connectBridge, delay);
+      });
+
+      rl.on("line", (line) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          return;
         }
 
-        setActiveAgentId(chosenId);
-        activeAgentIdRef.current = chosenId;
-        setConnecting(false);
-
-        if (chosenId && chosenId !== msg.activeAgentId) {
-          pendingSwitchIdRef.current = chosenId;
-          sendBridge({ cmd: "switch_agent", agentId: chosenId });
-        } else {
-          const active = list.find((a) => a.id === chosenId);
-          resetToAgentTimeline(active, msg.timeline ?? [], msg.commands ?? []);
-        }
-        return;
-      }
-
-      if (msg.type === "agents_updated") {
-        const list: HermesAgent[] = msg.agents ?? [];
-        const prevMap = prevStatusesRef.current;
-        const nextMap = new Map<string, string>();
-        const newlyDone: string[] = [];
-        const nowRunning: string[] = [];
-
-        for (const a of list) {
-          nextMap.set(a.id, a.status);
-          const prevStatus = prevMap.get(a.id);
-          if (a.status === "running") {
-            nowRunning.push(a.id);
-          } else if (prevStatus === "running" && a.id !== activeAgentIdRef.current) {
-            newlyDone.push(a.id);
+        if (msg.type === "init_ok") {
+          reconnectDelayRef.current = 1500;
+          setStatusNotice(null);
+          const list: HermesAgent[] = msg.agents ?? [];
+          setAgents(list);
+          setModels(msg.models ?? []);
+          const nextStatuses = new Map<string, string>();
+          for (const a of list) {
+            nextStatuses.set(a.id, a.status);
           }
-        }
-        prevStatusesRef.current = nextMap;
-        if (newlyDone.length > 0 || nowRunning.length > 0) {
-          setCompletedAgentIds((prev) => {
-            const next = new Set(prev);
-            for (const id of nowRunning) next.delete(id);
-            for (const id of newlyDone) next.add(id);
-            return next;
-          });
-        }
-        setAgents(list);
-        return;
-      }
+          prevStatusesRef.current = nextStatuses;
+          setCompletedAgentIds(new Set());
 
-      if (msg.type === "agent_switched") {
-        const nextId: string = msg.agentId;
-        if (pendingSwitchIdRef.current && nextId !== pendingSwitchIdRef.current) {
+          let chosenId: string | null =
+            (activeAgentIdRef.current && list.some((a) => a.id === activeAgentIdRef.current)
+              ? activeAgentIdRef.current
+              : null) ??
+            msg.activeAgentId ??
+            list[0]?.id ??
+            null;
+          if (!activeAgentIdRef.current && initialQuery) {
+            const q = initialQuery.toLowerCase();
+            const match = list.find(
+              (a) =>
+                a.id.toLowerCase().startsWith(q) ||
+                a.title.toLowerCase().includes(q) ||
+                a.projectName.toLowerCase().includes(q)
+            );
+            if (match) chosenId = match.id;
+          }
+
+          setActiveAgentId(chosenId);
+          activeAgentIdRef.current = chosenId;
+          setConnecting(false);
+
+          if (chosenId && chosenId !== msg.activeAgentId) {
+            pendingSwitchIdRef.current = chosenId;
+            sendBridge({ cmd: "switch_agent", agentId: chosenId });
+          } else {
+            const active = list.find((a) => a.id === chosenId);
+            resetToAgentTimeline(active, msg.timeline ?? [], msg.commands ?? []);
+          }
           return;
         }
-        pendingSwitchIdRef.current = null;
-        setActiveAgentId(nextId);
-        activeAgentIdRef.current = nextId;
-        const active = agentsRef.current.find((a) => a.id === nextId);
-        resetToAgentTimeline(active, msg.timeline ?? [], msg.commands ?? []);
-        setStatusNotice(null);
-        return;
-      }
 
-      if (msg.type === "timeline_reloaded") {
-        if (msg.agentId !== activeAgentIdRef.current) return;
-        const active = agentsRef.current.find((a) => a.id === msg.agentId);
-        resetToAgentTimeline(active, msg.timeline ?? [], []);
-        return;
-      }
+        if (msg.type === "agents_updated") {
+          const list: HermesAgent[] = msg.agents ?? [];
+          const prevMap = prevStatusesRef.current;
+          const nextMap = new Map<string, string>();
+          const newlyDone: string[] = [];
+          const nowRunning: string[] = [];
 
-      if (msg.type === "stream_event") {
-        if (msg.agentId !== activeAgentIdRef.current) return;
-        const m = msg.message;
-        if (m?.type === "agent.timeline.replacement") {
-          sendBridge({ cmd: "reload_timeline", agentId: msg.agentId });
-          return;
-        }
-        if (m?.type !== "agent_stream") return;
-        const ev = m.payload?.event;
-        if (!ev) return;
-
-        if (ev.type === "turn_started") {
-          setIsStreaming(true);
-          setLiveAssistant("");
-          setLiveTools([]);
-          setCompletedAgentIds((prev) => {
-            if (!prev.has(msg.agentId)) return prev;
-            const next = new Set(prev);
-            next.delete(msg.agentId);
-            return next;
-          });
-        } else if (ev.type === "timeline") {
-          const item: TimelineItem = ev.item;
-          if (item.type === "user_message" && item.text) {
-            flushLiveTurnToStatic();
-            pushStatic({ kind: "user", text: item.text.trim() });
-            setScrollOffset(0);
-          } else if (item.type === "reasoning") {
-            setIsStreaming(true);
-          } else if (item.type === "assistant_message" && item.text) {
-            setIsStreaming(true);
-            setLiveAssistant((prev) => prev + item.text);
-          } else if (item.type === "tool_call") {
-            const step = extractToolStep(item);
-            if (step) {
-              const callId = item.callId || `tool-${Date.now()}`;
-              setLiveTools((prev) => {
-                const idx = prev.findIndex((x) => x.callId === callId);
-                const nextItem: LiveTool = {
-                  callId,
-                  toolName: step.toolName,
-                  title: step.title,
-                  command: step.command,
-                  output: step.output,
-                  status: step.status,
-                };
-                if (idx >= 0) {
-                  const copy = [...prev];
-                  copy[idx] = nextItem;
-                  return copy;
-                }
-                return [...prev, nextItem];
-              });
+          for (const a of list) {
+            nextMap.set(a.id, a.status);
+            const prevStatus = prevMap.get(a.id);
+            if (a.status === "running") {
+              nowRunning.push(a.id);
+            } else if (prevStatus === "running" && a.id !== activeAgentIdRef.current) {
+              newlyDone.push(a.id);
             }
-          } else if (item.type === "error" && item.message) {
-            pushStatic({ kind: "error", text: item.message });
-          } else if (item.type === "notification" && item.message) {
-            pushStatic({ kind: "notice", text: item.message });
           }
-        } else if (ev.type === "turn_completed") {
-          flushLiveTurnToStatic();
-          if (msg.agentId !== activeAgentIdRef.current) {
+          prevStatusesRef.current = nextMap;
+          if (newlyDone.length > 0 || nowRunning.length > 0) {
             setCompletedAgentIds((prev) => {
               const next = new Set(prev);
-              next.add(msg.agentId);
+              for (const id of nowRunning) next.delete(id);
+              for (const id of newlyDone) next.add(id);
               return next;
             });
           }
-        } else if (ev.type === "turn_failed") {
-          flushLiveTurnToStatic();
-          pushStatic({ kind: "error", text: ev.error || "Tour échoué" });
-        } else if (ev.type === "turn_canceled") {
-          flushLiveTurnToStatic();
-          pushStatic({ kind: "notice", text: "Tour annulé." });
-        } else if (ev.type === "permission_requested" && ev.request) {
-          setPermission({
-            agentId: msg.agentId,
-            requestId: ev.request.requestId,
-            name: ev.request.name,
-            description: ev.request.description,
-            options: [
-              { id: "allow_once", label: "Autoriser une fois" },
-              { id: "allow_always", label: "Toujours autoriser" },
-              { id: "deny", label: "Refuser" },
-            ],
-          });
-          setModal("permission");
-          setModalIdx(0);
-        } else if (ev.type === "permission_resolved") {
-          setPermission(null);
-          setModal((prev) => (prev === "permission" ? "none" : prev));
+          setAgents(list);
+          return;
         }
-        return;
-      }
 
-      if (msg.type === "archived") {
-        if (msg.agentId === activeAgentIdRef.current) {
-          const next = agentsRef.current.find((a) => a.id !== msg.agentId);
-          if (next) {
-            activeAgentIdRef.current = null;
-            switchAgentById(next.id);
+        if (msg.type === "agent_switched") {
+          const nextId: string = msg.agentId;
+          if (pendingSwitchIdRef.current && nextId !== pendingSwitchIdRef.current) {
+            return;
           }
+          pendingSwitchIdRef.current = null;
+          setActiveAgentId(nextId);
+          activeAgentIdRef.current = nextId;
+          const active = agentsRef.current.find((a) => a.id === nextId);
+          resetToAgentTimeline(active, msg.timeline ?? [], msg.commands ?? []);
+          setStatusNotice(null);
+          return;
         }
-        return;
-      }
 
-      if (msg.type === "notice") {
-        setStatusNotice(msg.text);
-        pushStatic({ kind: "notice", text: msg.text });
-        return;
-      }
+        if (msg.type === "timeline_reloaded") {
+          if (msg.agentId !== activeAgentIdRef.current) return;
+          const active = agentsRef.current.find((a) => a.id === msg.agentId);
+          resetToAgentTimeline(active, msg.timeline ?? [], []);
+          return;
+        }
 
-      if (msg.type === "error" || msg.type === "fatal") {
-        setStatusNotice(msg.message);
-        pushStatic({ kind: "error", text: msg.message });
-      }
-    });
+        if (msg.type === "stream_event") {
+          if (msg.agentId !== activeAgentIdRef.current) return;
+          const m = msg.message;
+          if (m?.type === "agent.timeline.replacement") {
+            sendBridge({ cmd: "reload_timeline", agentId: msg.agentId });
+            return;
+          }
+          if (m?.type !== "agent_stream") return;
+          const ev = m.payload?.event;
+          if (!ev) return;
 
-    proc.stdin.write(`${JSON.stringify({ cmd: "init" })}\n`);
+          if (ev.type === "turn_started") {
+            setIsStreaming(true);
+            setLiveAssistant("");
+            setLiveTools([]);
+            setCompletedAgentIds((prev) => {
+              if (!prev.has(msg.agentId)) return prev;
+              const next = new Set(prev);
+              next.delete(msg.agentId);
+              return next;
+            });
+          } else if (ev.type === "timeline") {
+            const item: TimelineItem = ev.item;
+            if (item.type === "user_message" && item.text) {
+              flushLiveTurnToStatic();
+              pushStatic({ kind: "user", text: item.text.trim() });
+              setScrollOffset(0);
+            } else if (item.type === "reasoning") {
+              setIsStreaming(true);
+            } else if (item.type === "assistant_message" && item.text) {
+              setIsStreaming(true);
+              setLiveAssistant((prev) => prev + item.text);
+            } else if (item.type === "tool_call") {
+              const step = extractToolStep(item);
+              if (step) {
+                const callId = item.callId || `tool-${Date.now()}`;
+                setLiveTools((prev) => {
+                  const idx = prev.findIndex((x) => x.callId === callId);
+                  const nextItem: LiveTool = {
+                    callId,
+                    toolName: step.toolName,
+                    title: step.title,
+                    command: step.command,
+                    output: step.output,
+                    status: step.status,
+                  };
+                  if (idx >= 0) {
+                    const copy = [...prev];
+                    copy[idx] = nextItem;
+                    return copy;
+                  }
+                  return [...prev, nextItem];
+                });
+              }
+            } else if (item.type === "error" && item.message) {
+              pushStatic({ kind: "error", text: item.message });
+            } else if (item.type === "notification" && item.message) {
+              pushStatic({ kind: "notice", text: item.message });
+            }
+          } else if (ev.type === "turn_completed") {
+            flushLiveTurnToStatic();
+            if (msg.agentId !== activeAgentIdRef.current) {
+              setCompletedAgentIds((prev) => {
+                const next = new Set(prev);
+                next.add(msg.agentId);
+                return next;
+              });
+            }
+          } else if (ev.type === "turn_failed") {
+            flushLiveTurnToStatic();
+            pushStatic({ kind: "error", text: ev.error || "Tour échoué" });
+          } else if (ev.type === "turn_canceled") {
+            flushLiveTurnToStatic();
+            pushStatic({ kind: "notice", text: "Tour annulé." });
+          } else if (ev.type === "permission_requested" && ev.request) {
+            setPermission({
+              agentId: msg.agentId,
+              requestId: ev.request.requestId,
+              name: ev.request.name,
+              description: ev.request.description,
+              options: [
+                { id: "allow_once", label: "Autoriser une fois" },
+                { id: "allow_always", label: "Toujours autoriser" },
+                { id: "deny", label: "Refuser" },
+              ],
+            });
+            setModal("permission");
+            setModalIdx(0);
+          } else if (ev.type === "permission_resolved") {
+            setPermission(null);
+            setModal((prev) => (prev === "permission" ? "none" : prev));
+          }
+          return;
+        }
+
+        if (msg.type === "archived") {
+          if (msg.agentId === activeAgentIdRef.current) {
+            const next = agentsRef.current.find((a) => a.id !== msg.agentId);
+            if (next) {
+              activeAgentIdRef.current = null;
+              switchAgentById(next.id);
+            }
+          }
+          return;
+        }
+
+        if (msg.type === "notice") {
+          setStatusNotice(msg.text);
+          pushStatic({ kind: "notice", text: msg.text });
+          return;
+        }
+
+        if (msg.type === "error" || msg.type === "fatal") {
+          setStatusNotice(msg.message);
+          pushStatic({ kind: "error", text: msg.message });
+        }
+      });
+
+      proc.stdin.write(`${JSON.stringify({ cmd: "init", ...(activeAgentIdRef.current ? { agentId: activeAgentIdRef.current } : {}) })}\n`);
+    };
+
+    connectBridge();
 
     return () => {
+      intentionalCloseRef.current = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       try {
-        proc.stdin.end();
-        proc.kill("SIGTERM");
+        bridgeRef.current?.stdin.end();
+        bridgeRef.current?.kill("SIGTERM");
       } catch {
         // ignore
       }
@@ -1233,6 +1269,20 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     sendBridge({ cmd: "switch_agent", agentId: id });
   }
 
+  function setPrompt(text: string, pos: number = text.length): void {
+    const clamped = Math.max(0, Math.min(text.length, pos));
+    inputRef.current = text;
+    cursorRef.current = clamped;
+    setInput(text);
+    setCursor(clamped);
+  }
+
+  function insertAtCursor(addition: string): void {
+    const curText = inputRef.current;
+    const pos = cursorRef.current;
+    setPrompt(curText.slice(0, pos) + addition + curText.slice(pos), pos + addition.length);
+  }
+
   function handleSubmitLine(raw: string): void {
     let trimmed = raw.trim();
     const pendingFiles = attachmentsRef.current;
@@ -1241,7 +1291,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
     setPromptHistory((prev) => [trimmed, ...prev.slice(0, 49)]);
     setHistoryIdx(-1);
-    setInput("");
+    setPrompt("", 0);
 
     if (trimmed.startsWith("/")) {
       const [cmdPart, ...rest] = trimmed.slice(1).split(/\s+/);
@@ -1249,10 +1299,17 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       const arg = rest.join(" ").trim();
 
       if (cmdName === "quit" || cmdName === "exit" || cmdName === "q") {
+        intentionalCloseRef.current = true;
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         bridgeRef.current?.stdin.end();
         bridgeRef.current?.kill("SIGTERM");
         cleanupTerminalScreen();
         exit();
+        return;
+      }
+      if (cmdName === "new") {
+        setStatusNotice("Création de la session…");
+        sendBridge({ cmd: "create_agent", fromAgentId: activeAgentId, ...(arg ? { title: arg } : {}) });
         return;
       }
       if (cmdName === "clear") {
@@ -1366,10 +1423,12 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     return [...staticLines, ...live];
   }, [staticLines, liveLines, busy, spinner]);
 
+  const promptLines = useMemo(() => input.split("\n"), [input]);
+  const visiblePromptRows = Math.min(5, Math.max(1, promptLines.length));
   const rootHeight = Math.max(12, termRows - 1);
   const hasTopInfoLine = connecting || Boolean(statusNotice) || scrollOffset > 0;
   const topBarHeight = topTabs.rows.length + 1 + (hasTopInfoLine ? 1 : 0); // tab rows + optional info line + borderBottom
-  const promptHeight = 3 + (attachments.length > 0 ? 1 : 0); // borderTop + input + borderBottom + attachments row
+  const promptHeight = 2 + visiblePromptRows + (attachments.length > 0 ? 1 : 0); // borderTop + lines + borderBottom + attachments row
   const statusBarHeight = 1;
   const slashHeight = slashSuggestions.length > 0 ? slashSuggestions.length + 2 : 0;
 
@@ -1431,7 +1490,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           setAttachments((prev) => [...prev, ...got]);
           setStatusNotice(null);
         } else if (text) {
-          setInput((v) => v + text.replace(/\r?\n/g, " "));
+          insertAtCursor(text.replace(/\r\n/g, "\n"));
           setStatusNotice(null);
         } else {
           setStatusNotice("Presse-papiers vide.");
@@ -1456,9 +1515,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         return;
       }
     }
-    const singleLine = clean.replace(/\r?\n/g, " ");
+    const singleLine = clean.replace(/\r\n/g, "\n");
     if (singleLine) {
-      setInput((v) => v + singleLine);
+      insertAtCursor(singleLine);
       setSlashIdx(0);
     }
   }
@@ -1573,6 +1632,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     }
 
     if (key.ctrl && char === "c") {
+      intentionalCloseRef.current = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       bridgeRef.current?.stdin.end();
       bridgeRef.current?.kill("SIGTERM");
       cleanupTerminalScreen();
@@ -1693,7 +1754,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       if (isStreaming || activeAgent?.status === "running") {
         if (activeAgentId) sendBridge({ cmd: "cancel", agentId: activeAgentId });
       } else if (input) {
-        setInput("");
+        setPrompt("", 0);
       }
       return;
     }
@@ -1710,7 +1771,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       if (key.tab) {
         const picked = slashSuggestions[slashIdx] ?? slashSuggestions[0];
         if (picked) {
-          setInput(`/${picked.name}${picked.argumentHint ? " " : ""}`);
+          const next = `/${picked.name}${picked.argumentHint ? " " : ""}`;
+          setPrompt(next, next.length);
           setSlashIdx(0);
         }
         return;
@@ -1726,33 +1788,89 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       if (key.upArrow && promptHistory.length > 0) {
         const nextIdx = Math.min(historyIdx + 1, promptHistory.length - 1);
         setHistoryIdx(nextIdx);
-        setInput(promptHistory[nextIdx]);
+        const h = promptHistory[nextIdx];
+        setPrompt(h, h.length);
         return;
       }
       if (key.downArrow) {
         if (historyIdx > 0) {
           const nextIdx = historyIdx - 1;
           setHistoryIdx(nextIdx);
-          setInput(promptHistory[nextIdx]);
+          const h = promptHistory[nextIdx];
+          setPrompt(h, h.length);
         } else if (historyIdx === 0) {
           setHistoryIdx(-1);
-          setInput("");
+          setPrompt("", 0);
         }
         return;
       }
     }
 
+    // Prompt cursor navigation & editing shortcuts
+    if (key.leftArrow) {
+      setPrompt(inputRef.current, cursorRef.current - 1);
+      return;
+    }
+    if (key.rightArrow) {
+      setPrompt(inputRef.current, cursorRef.current + 1);
+      return;
+    }
+    if (char === "[H" || char === "[1~" || char === "OH") {
+      setPrompt(inputRef.current, 0);
+      return;
+    }
+    if (char === "[F" || char === "[4~" || char === "OF" || (key.ctrl && char === "e")) {
+      setPrompt(inputRef.current, inputRef.current.length);
+      return;
+    }
+    if (key.ctrl && char === "u") {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      const lineStart = curText.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
+      setPrompt(curText.slice(0, lineStart) + curText.slice(pos), lineStart);
+      return;
+    }
+    if (key.ctrl && char === "k") {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      const nl = curText.indexOf("\n", pos);
+      const lineEnd = nl === -1 ? curText.length : nl;
+      setPrompt(curText.slice(0, pos) + curText.slice(lineEnd), pos);
+      return;
+    }
+    if (key.ctrl && char === "w") {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      const before = curText.slice(0, pos);
+      const trimmedRight = before.replace(/\s+$/, "");
+      const wordStart = trimmedRight.search(/\S+$/);
+      const cutAt = wordStart >= 0 ? wordStart : 0;
+      setPrompt(curText.slice(0, cutAt) + curText.slice(pos), cutAt);
+      return;
+    }
+
+    // Shift+Enter (CSI-u from foot/ghostty), Alt+Enter, or Ctrl+J inserts newline
+    if (char === "[13;2u" || char === "[13;4u" || (key.meta && key.return) || (key.ctrl && char === "j")) {
+      insertAtCursor("\n");
+      setSlashIdx(0);
+      return;
+    }
+
     if (key.return) {
-      handleSubmitLine(input);
+      handleSubmitLine(inputRef.current);
       return;
     }
 
     if (key.backspace || key.delete) {
-      if (!input && attachmentsRef.current.length > 0) {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      if (!curText && attachmentsRef.current.length > 0) {
         setAttachments((prev) => prev.slice(0, -1));
         return;
       }
-      setInput((v) => v.slice(0, -1));
+      if (pos > 0) {
+        setPrompt(curText.slice(0, pos - 1) + curText.slice(pos), pos - 1);
+      }
       setSlashIdx(0);
       return;
     }
@@ -1773,7 +1891,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           }
         }
       }
-      setInput((v) => v + char);
+      insertAtCursor(char);
       setSlashIdx(0);
     }
   });
@@ -1803,7 +1921,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           <Box height={1} overflow="hidden" justifyContent="space-between" gap={1}>
             <Text wrap="truncate-end">
               {connecting ? (
-                <Text color="yellow">{spinner} Connexion à Paseo ({TARGET_LABEL})…</Text>
+                <Text color="yellow">{spinner} {statusNotice || `Connexion à Paseo (${TARGET_LABEL})…`}</Text>
               ) : statusNotice ? (
                 <Text color="yellow">{statusNotice}</Text>
               ) : (
@@ -1955,6 +2073,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
       {/* Minimalist prompt box with Yoga-managed top/bottom borders */}
       <Box
+        flexDirection="column"
         borderStyle="single"
         borderTop
         borderBottom
@@ -1964,11 +2083,37 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         paddingX={1}
         width="100%"
       >
-        <Text color={busy ? "yellow" : "cyan"} bold>
-          {"> "}
-        </Text>
-        <Text>{input}</Text>
-        <Text color="cyan">█</Text>
+        {(() => {
+          const linesWithOffsets: Array<{ text: string; start: number; end: number; idx: number }> = [];
+          let offset = 0;
+          promptLines.forEach((lineText, idx) => {
+            linesWithOffsets.push({ text: lineText, start: offset, end: offset + lineText.length, idx });
+            offset += lineText.length + 1;
+          });
+          const cursorLineIdx = linesWithOffsets.find((l) => cursor >= l.start && cursor <= l.end)?.idx ?? linesWithOffsets.length - 1;
+          const startIdx = Math.max(0, Math.min(linesWithOffsets.length - visiblePromptRows, cursorLineIdx - visiblePromptRows + 1));
+          const shown = linesWithOffsets.slice(startIdx, startIdx + visiblePromptRows);
+
+          return shown.map((l) => {
+            const hasCursor = l.idx === cursorLineIdx;
+            const rel = hasCursor ? Math.max(0, Math.min(l.text.length, cursor - l.start)) : -1;
+            const before = hasCursor ? l.text.slice(0, rel) : l.text;
+            const curChar = hasCursor ? (rel < l.text.length ? chalk.inverse(l.text[rel]) : chalk.cyan("█")) : "";
+            const after = hasCursor && rel < l.text.length ? l.text.slice(rel + 1) : "";
+            return (
+              <Box key={`prompt-line-${l.idx}`} height={1} overflow="hidden">
+                <Text color={busy ? "yellow" : "cyan"} bold>
+                  {l.idx === 0 ? "> " : "  "}
+                </Text>
+                <Text wrap="truncate-end">
+                  {before}
+                  {curChar}
+                  {after}
+                </Text>
+              </Box>
+            );
+          });
+        })()}
       </Box>
 
       {/* Single-line minimalist status bar */}

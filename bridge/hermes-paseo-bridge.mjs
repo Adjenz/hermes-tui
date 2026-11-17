@@ -65,6 +65,7 @@ function compactAgent(entry) {
     availableModes: a.availableModes ?? [],
     thinkingOptionId: a.effectiveThinkingOptionId ?? a.thinkingOptionId ?? a.runtimeInfo?.thinkingOptionId ?? null,
     updatedAt: a.updatedAt ?? a.createdAt ?? "",
+    workspaceId: a.workspaceId ?? null,
     persistence: a.persistence ?? null,
     archivedAt: a.archivedAt ?? null,
     requiresAttention: Boolean(a.requiresAttention),
@@ -288,6 +289,30 @@ async function main() {
         ...(images.length > 0 ? { images } : {}),
       });
       emit({ type: "send_ack", agentId, deliveryStatus: receipt?.deliveryStatus ?? "sent" });
+      return;
+    }
+
+    if (cmd === "create_agent") {
+      const refEntry = msg.fromAgentId ? agentsMap.get(msg.fromAgentId) : null;
+      const ref = refEntry ? compactAgent(refEntry) : null;
+      const cwd = msg.cwd || ref?.cwd || os.homedir();
+      const created = await client.createAgent({
+        provider: "hermes",
+        cwd,
+        ...(msg.title ? { title: msg.title } : {}),
+        ...(ref?.workspaceId ? { workspaceId: ref.workspaceId } : {}),
+        ...(ref?.model ? { model: ref.model } : {}),
+        ...(ref?.thinkingOptionId ? { thinkingOptionId: ref.thinkingOptionId } : {}),
+        ...(ref?.modeId ? { modeId: ref.modeId } : {}),
+      });
+      await refreshAgentsList(true);
+      const newId = created.id;
+      void subscribeToAgent(newId);
+      const [timeline, commands] = await Promise.all([
+        loadTimeline(newId).catch(() => []),
+        loadCommands(newId, created.status),
+      ]);
+      emit({ type: "agent_switched", agentId: newId, timeline, commands });
       return;
     }
 
