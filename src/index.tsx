@@ -1159,14 +1159,15 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
               for (const id of newlyDone) next.add(id);
               return next;
             });
-            for (const doneId of newlyDone) {
-              const doneAgent = list.find((a) => a.id === doneId);
-              if (doneAgent) {
-                sendDesktopNotification("hermes-tui", `✓ ${doneAgent.title} a terminé`);
-              }
-            }
           }
           setAgents(list);
+          return;
+        }
+
+        if (msg.type === "agent_finished_notify") {
+          if (!msg.silent && msg.agentId !== activeAgentIdRef.current) {
+            sendDesktopNotification(msg.title || "hermes-tui", msg.preview || "✓ Terminé");
+          }
           return;
         }
 

@@ -120,6 +120,52 @@ async function main() {
   let activeUnsub = null;
   let observeSub = null;
   let refreshTimer = null;
+  const prevStatuses = new Map();
+
+  async function loadLastReplyPreview(agentId) {
+    try {
+      const tl = await client.fetchAgentTimeline(agentId, {
+        direction: "tail",
+        limit: 15,
+        projection: "projected",
+        timeout: 2000,
+      });
+      const items = (tl?.entries ?? []).map((e) => e.item).filter(Boolean);
+      let text = "";
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.type === "assistant_message" && it.text) {
+          text = it.text + text;
+        } else if (it.type === "reasoning") {
+          continue;
+        } else if (text) {
+          break;
+        } else if (it.type === "user_message") {
+          break;
+        }
+      }
+      const cleaned = text
+        .replace(/\r\n/g, "\n")
+        .replace(/(?:^|\n)[ \t]*💭\s*Reasoning:\s*\n[ \t]*╭[\s\S]*?╰[─━\s]*╯[ \t]*(?=\n|$)/g, "\n")
+        .split("\n")
+        .filter((l) => !/^⚠️?\s*The model returned only a silence marker/i.test(l.trim()))
+        .join("\n")
+        .trim();
+      if (!cleaned || /^[*_`.~]*(?:\[?SILENT\]?|NO[_\s]REPLY)[*_`.~]*$/i.test(cleaned)) {
+        return { silent: Boolean(cleaned), preview: "" };
+      }
+      const oneLine = cleaned
+        .replace(/[`*_#>\[\]]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return {
+        silent: false,
+        preview: oneLine.length > 140 ? `${oneLine.slice(0, 139)}…` : oneLine,
+      };
+    } catch {
+      return { silent: false, preview: "" };
+    }
+  }
 
   async function refreshAgentsList(emitUpdate = true) {
     const res = await client.fetchAgents({});
@@ -132,8 +178,23 @@ async function main() {
     }
     agentsMap = nextMap;
     const sorted = sortHermesAgents(Array.from(agentsMap.values()));
+
+    const finishedBg = [];
+    for (const a of sorted) {
+      const prev = prevStatuses.get(a.id);
+      if (emitUpdate && prev === "running" && a.status !== "running" && a.id !== activeAgentId) {
+        finishedBg.push(a);
+      }
+      prevStatuses.set(a.id, a.status);
+    }
+
     if (emitUpdate) {
       emit({ type: "agents_updated", agents: sorted });
+      for (const a of finishedBg) {
+        loadLastReplyPreview(a.id).then(({ silent, preview }) => {
+          emit({ type: "agent_finished_notify", agentId: a.id, title: a.title, silent, preview });
+        });
+      }
     }
     return sorted;
   }
