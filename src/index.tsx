@@ -958,7 +958,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           const prevStatus = prevMap.get(a.id);
           if (a.status === "running") {
             nowRunning.push(a.id);
-          } else if (prevStatus === "running") {
+          } else if (prevStatus === "running" && a.id !== activeAgentIdRef.current) {
             newlyDone.push(a.id);
           }
         }
@@ -1057,11 +1057,13 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           }
         } else if (ev.type === "turn_completed") {
           flushLiveTurnToStatic();
-          setCompletedAgentIds((prev) => {
-            const next = new Set(prev);
-            next.add(msg.agentId);
-            return next;
-          });
+          if (msg.agentId !== activeAgentIdRef.current) {
+            setCompletedAgentIds((prev) => {
+              const next = new Set(prev);
+              next.add(msg.agentId);
+              return next;
+            });
+          }
         } else if (ev.type === "turn_failed") {
           flushLiveTurnToStatic();
           pushStatic({ kind: "error", text: ev.error || "Tour échoué" });
@@ -1180,7 +1182,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   }
 
   function switchAgentById(id: string): void {
-    if (!id || id === activeAgentIdRef.current) {
+    const prevId = activeAgentIdRef.current;
+    if (!id || id === prevId) {
       setModal("none");
       return;
     }
@@ -1188,6 +1191,13 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     pendingSwitchIdRef.current = id;
     activeAgentIdRef.current = id;
     setActiveAgentId(id);
+    setCompletedAgentIds((prev) => {
+      if (!prev.has(id) && !(prevId && prev.has(prevId))) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      if (prevId) next.delete(prevId);
+      return next;
+    });
     setStaticItems([]);
     setLiveAssistant("");
     setLiveTools([]);
