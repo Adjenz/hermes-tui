@@ -1139,16 +1139,24 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             flushLiveTurnToStatic();
             pushStatic({ kind: "notice", text: "Tour annulé." });
           } else if (ev.type === "permission_requested" && ev.request) {
+            const reqId = String(ev.request.id ?? ev.request.requestId ?? "");
+            const rawActions = Array.isArray(ev.request.actions) && ev.request.actions.length > 0
+              ? ev.request.actions.map((act: any) => ({
+                  id: String(act.id ?? act.optionId ?? "allow_once"),
+                  label: String(act.label ?? act.name ?? act.id ?? "Autoriser"),
+                  kind: act.kind ? String(act.kind) : undefined,
+                }))
+              : [
+                  { id: "allow_once", label: "Autoriser une fois", kind: "allow" },
+                  { id: "allow_always", label: "Toujours autoriser", kind: "allow" },
+                  { id: "deny", label: "Refuser", kind: "deny" },
+                ];
             setPermission({
               agentId: msg.agentId,
-              requestId: ev.request.requestId,
-              name: ev.request.name,
+              requestId: reqId,
+              name: ev.request.title || ev.request.name || "Permission",
               description: ev.request.description,
-              options: [
-                { id: "allow_once", label: "Autoriser une fois" },
-                { id: "allow_always", label: "Toujours autoriser" },
-                { id: "deny", label: "Refuser" },
-              ],
+              options: rawActions,
             });
             setModal("permission");
             setModalIdx(0);
@@ -1734,13 +1742,17 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           sendBridge({ cmd: "set_mode", agentId: activeAgentId, modeId: modeChoices[modalIdx].id });
           setModal("none");
         } else if (modal === "permission" && permission) {
-          const choice = permission.options[modalIdx]?.id ?? "allow_once";
-          const allow = choice !== "deny";
+          const picked = permission.options[modalIdx] ?? permission.options[0];
+          const choiceId = picked?.id ?? "allow_once";
+          const isDeny = picked?.kind === "deny" || /deny|reject/i.test(choiceId);
           sendBridge({
             cmd: "respond_permission",
             agentId: permission.agentId,
             requestId: permission.requestId,
-            response: { behavior: allow ? "allow" : "deny" },
+            response: {
+              behavior: isDeny ? "deny" : "allow",
+              ...(picked?.id ? { selectedActionId: picked.id } : {}),
+            },
           });
           setPermission(null);
           setModal("none");
