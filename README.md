@@ -139,3 +139,9 @@ htui --help       # Show CLI help
 - **Adjenz** — Creator & maintainer
 - **Gemini** — Architecture, UI/UX, and implementation
 - **Claude** — Performance optimization, features, and polish
+
+---
+
+## License
+
+[MIT](LICENSE) © Adjenz
