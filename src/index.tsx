@@ -363,13 +363,13 @@ function formatWorkGroupLines(steps: WorkStep[], showDetails: boolean, maxWidth:
         .filter((l) => l.trim().length > 0);
       const maxOutLines = 40;
       const shown = nonEmptyLines.slice(0, maxOutLines);
-      for (const ol of shown) {
-        const prefix = "  ⎿  ";
+      shown.forEach((ol, oi) => {
+        const prefix = oi === 0 ? "  ⎿  " : "     ";
         const wrapped = wrapAnsiText(chalk.dim(ol), maxWidth, chalk.dim(prefix), "     ");
         lines.push(...wrapped.split("\n"));
-      }
+      });
       if (nonEmptyLines.length > maxOutLines) {
-        lines.push(chalk.dim(`  ⎿  … (+${nonEmptyLines.length - maxOutLines} lignes)`));
+        lines.push(chalk.dim(`     … (+${nonEmptyLines.length - maxOutLines} lignes)`));
       }
     }
   });
