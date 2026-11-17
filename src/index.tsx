@@ -1328,8 +1328,19 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         return;
       }
       if (cmdName === "new") {
+        const cleanArg = arg.replace(/^["']|["']$/g, "").trim();
+        const basePersona =
+          activeAgent?.title?.split(" - ")[0]?.trim() || activeAgent?.projectName?.trim() || "";
+        let finalTitle = cleanArg;
+        if (basePersona) {
+          if (!cleanArg) {
+            finalTitle = `${basePersona} - Session`;
+          } else if (!cleanArg.toLowerCase().startsWith(`${basePersona.toLowerCase()} - `)) {
+            finalTitle = `${basePersona} - ${cleanArg}`;
+          }
+        }
         setStatusNotice("Création de la session…");
-        sendBridge({ cmd: "create_agent", fromAgentId: activeAgentId, ...(arg ? { title: arg } : {}) });
+        sendBridge({ cmd: "create_agent", fromAgentId: activeAgentId, ...(finalTitle ? { title: finalTitle } : {}) });
         return;
       }
       if (cmdName === "clear") {
