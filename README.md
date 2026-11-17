@@ -119,6 +119,8 @@ htui --help       # Show CLI help
 | `Ctrl+T` / `/thinking` | Change thinking level |
 | `/mode` | Change approval mode (`default`, `accept_edits`, `dont_ask`) |
 | `/new [title]` | Create a new Hermes session |
+| `/title <name>` | Rename the current session tab in Paseo |
+| `/reset` | Recreate a fresh session with the same name & archive the old one |
 | `/archive` | Archive the current session |
 | `←`/`→`, `Home`/`End`, `Ctrl+W`/`U`/`K` | Move cursor & edit prompt |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the prompt |

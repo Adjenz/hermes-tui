@@ -335,6 +335,33 @@ async function main() {
       return;
     }
 
+    if (cmd === "reset_agent") {
+      const oldId = msg.agentId || activeAgentId;
+      if (!oldId) throw new Error("Missing agentId");
+      const refEntry = agentsMap.get(oldId);
+      const ref = refEntry ? compactAgent(refEntry) : null;
+      const cwd = ref?.cwd || os.homedir();
+      const created = await client.createAgent({
+        provider: "hermes",
+        cwd,
+        ...(ref?.title ? { title: ref.title } : {}),
+        ...(ref?.workspaceId ? { workspaceId: ref.workspaceId } : {}),
+        ...(ref?.model ? { model: ref.model } : {}),
+        ...(ref?.thinkingOptionId ? { thinkingOptionId: ref.thinkingOptionId } : {}),
+        ...(ref?.modeId ? { modeId: ref.modeId } : {}),
+      });
+      await client.archiveAgent(oldId).catch(() => {});
+      await refreshAgentsList(true);
+      const newId = created.id;
+      void subscribeToAgent(newId);
+      const [timeline, commands] = await Promise.all([
+        loadTimeline(newId).catch(() => []),
+        loadCommands(newId, created.status),
+      ]);
+      emit({ type: "agent_switched", agentId: newId, timeline, commands });
+      return;
+    }
+
     if (cmd === "cancel") {
       const agentId = msg.agentId || activeAgentId;
       if (!agentId) return;

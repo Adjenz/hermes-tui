@@ -194,6 +194,7 @@ const COLOR_DONE = "#22c55e"; // Vert pour "terminé"
 const LOCAL_COMMANDS: SlashCommand[] = [
   { name: "new", description: "Créer une nouvelle session Hermes", argumentHint: "[titre]", isLocal: true },
   { name: "title", description: "Renommer l'onglet de session dans Paseo", argumentHint: "<titre>", isLocal: true },
+  { name: "reset", description: "Recréer la session à neuf (même nom) et archiver l'ancienne", isLocal: true },
   { name: "sessions", description: "Menu des onglets de session avec badges", argumentHint: "[filtre]", isLocal: true },
   { name: "agent", description: "Basculer vers un autre agent / session Hermes", argumentHint: "[filtre]", isLocal: true },
   { name: "model", description: "Choisir le modèle / provider LLM", argumentHint: "[id]", isLocal: true },
@@ -1372,6 +1373,13 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         if (activeAgentId) {
           setStatusNotice("Archivage de la session…");
           sendBridge({ cmd: "archive_agent", agentId: activeAgentId });
+        }
+        return;
+      }
+      if (cmdName === "reset") {
+        if (activeAgentId) {
+          setStatusNotice("Réinitialisation de la session…");
+          sendBridge({ cmd: "reset_agent", agentId: activeAgentId });
         }
         return;
       }
