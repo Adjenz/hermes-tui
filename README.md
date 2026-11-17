@@ -16,14 +16,17 @@ A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s def
   - `⠋` **orange**: running (*working*)
   - `●` **green**: turn finished (*terminé*)
   - `○` **dim**: waiting (*idle*)
-- **Clean collapsible tool calls (`Ctrl+O`) & live `Thinking…` indicator:** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), expand cleanly with single-`⎿` indentation, and reasoning shows a minimal live `Thinking…` indicator.
+- **Clean collapsible tool calls (`Ctrl+O`) & live `Thinking…` indicator:** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), expand cleanly with single-`⎿` indentation and colorized `Edit` diffs (`+`/`-`), and reasoning shows a minimal live `Thinking…` indicator.
 - **Modern terminal ergonomics:**
-  - Full prompt editing (`←`/`→`, `Home`/`End`, `Ctrl+E`, `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, and multi-line input via `Shift+Enter` / `Alt+Enter`).
+  - Full prompt editing (`←`/`→`, `Home`/`End`, `Ctrl+E`, `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, and multi-line input via `Shift+Enter` / `Alt+Enter`) with **per-session drafts** preserved when switching tabs.
+  - Instant **in-session search** (`Ctrl+F`) with match highlighting and auto-jump.
   - Mouse drag selection with **auto-copy on release** (`wl-copy` + `OSC 52`).
   - Mouse wheel and `PgUp`/`PgDn` scrolling.
   - Clipboard **image, PDF, and file attachments** via `Ctrl+V` (or pasted path / `file://` URI).
   - Live **context window usage** (`used/max (%)`) in the bottom status bar.
-  - Interactive pickers for **models/providers** (`Ctrl+L`), **thinking level** (`Ctrl+T`), **approval mode** (`/mode`), and **sessions** (`Ctrl+S` / `Ctrl+A`).
+  - Desktop notifications (`notify-send`, disable via `HERMES_TUI_NOTIFY=0`) when background agents finish or request permission.
+  - Client-side **`NO_REPLY` / `[SILENT]` filter** to keep conversations noise-free.
+  - Interactive pickers for **models/providers** (`Ctrl+L`), **thinking level** (`Ctrl+T`), **approval mode** (`/mode`), and **sessions** (`Ctrl+S` / `Ctrl+A`), backed by a stale-while-revalidate timeline cache.
   - Create (`/new [title]`), rename (`/title <name>`), reset (`/reset`), and archive (`/archive`) sessions directly from the TUI.
 
 ---
@@ -112,6 +115,7 @@ htui --help       # Show CLI help
 | Mouse drag in chat | Select text & auto-copy on release |
 | Mouse wheel / `PgUp` / `PgDn` | Scroll conversation history |
 | `Ctrl+O` | Expand / collapse tool call details |
+| `Ctrl+F` | Search in current conversation (`Enter` / `↑↓` to jump, `Esc` to close) |
 | `Ctrl+V` | Attach clipboard image / PDF / file (or paste text) |
 | `Ctrl+S` / `Ctrl+A` / `/sessions` | Open full session picker with search & badges |
 | `Ctrl+N` / `Ctrl+P` | Next / previous session |

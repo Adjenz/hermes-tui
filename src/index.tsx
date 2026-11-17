@@ -262,6 +262,53 @@ function formatContextUsage(usage: AgentUsage | null | undefined): { label: stri
   return { label: `${formatTokens(used)} ctx` };
 }
 
+function sendDesktopNotification(title: string, body: string): void {
+  if (process.env.HERMES_TUI_NOTIFY === "0") return;
+  try {
+    const p = spawnProc("notify-send", ["-a", "hermes-tui", "-t", "4000", title, body], {
+      stdio: "ignore",
+      detached: true,
+    });
+    p.on("error", () => {});
+    p.unref();
+  } catch {
+    // ignore if notify-send is unavailable
+  }
+}
+
+const SILENCE_MARKER_RE = /^[*_`.~]*(?:\[?SILENT\]?|NO[_\s]REPLY)[*_`.~]*$/i;
+
+function filterNoReply(rawText: string): { isSilentOnly: boolean; text: string } {
+  const trimmed = rawText.trim();
+  if (!trimmed) return { isSilentOnly: false, text: rawText };
+  if (SILENCE_MARKER_RE.test(trimmed)) {
+    return { isSilentOnly: true, text: "" };
+  }
+  const lines = rawText.replace(/\s+$/, "").split("\n");
+  if (lines.length >= 2 && SILENCE_MARKER_RE.test(lines[lines.length - 1].trim())) {
+    lines.pop();
+    const cleaned = lines.join("\n").replace(/\s+$/, "");
+    if (!cleaned.trim()) return { isSilentOnly: true, text: "" };
+    return { isSilentOnly: false, text: cleaned };
+  }
+  return { isSilentOnly: false, text: rawText };
+}
+
+function colorizeToolOutputLine(ol: string, isEdit: boolean): string {
+  if (isEdit || /^(diff --git |@@ |--- |\+\+\+ )/.test(ol)) {
+    if (ol.startsWith("+++ ") || ol.startsWith("--- ") || ol.startsWith("@@ ")) {
+      return chalk.cyan(ol);
+    }
+    if (ol.startsWith("+")) {
+      return chalk.hex("#22c55e")(ol);
+    }
+    if (ol.startsWith("-")) {
+      return chalk.hex("#ef4444")(ol);
+    }
+  }
+  return chalk.dim(ol);
+}
+
 function getPersonaIcon(agent: HermesAgent | undefined): string {
   if (!agent) return "🔮";
   return "🤖";
@@ -391,9 +438,11 @@ function formatWorkGroupLines(steps: WorkStep[], showDetails: boolean, maxWidth:
         .filter((l) => l.trim().length > 0);
       const maxOutLines = 40;
       const shown = nonEmptyLines.slice(0, maxOutLines);
+      const isEdit = step.toolName === "Edit";
       shown.forEach((ol, oi) => {
         const prefix = oi === 0 ? "  ⎿  " : "     ";
-        const wrapped = wrapAnsiText(chalk.dim(ol), maxWidth, chalk.dim(prefix), "     ");
+        const colored = colorizeToolOutputLine(ol, isEdit);
+        const wrapped = wrapAnsiText(colored, maxWidth, chalk.dim(prefix), "     ");
         lines.push(...wrapped.split("\n"));
       });
       if (nonEmptyLines.length > maxOutLines) {
@@ -425,10 +474,11 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
   const flushAssistant = () => {
     if (assistantAcc.trim()) {
       flushWorkGroup();
+      const filtered = filterNoReply(assistantAcc.replace(/^\n+/, ""));
       entries.push({
         key: `${epoch}-a-${idx++}`,
-        kind: "assistant",
-        text: assistantAcc.replace(/^\n+/, ""),
+        kind: filtered.isSilentOnly ? "notice" : "assistant",
+        text: filtered.isSilentOnly ? "NO_REPLY" : filtered.text,
       });
     }
     assistantAcc = "";
@@ -542,7 +592,12 @@ function buildConversationLines(
       if (liveAssistant) lines.push("");
     }
     if (liveAssistant) {
-      lines.push(...renderMarkdownToLines(liveAssistant.replace(/^\n+/, ""), contentWidth, "  "));
+      const filtered = filterNoReply(liveAssistant.replace(/^\n+/, ""));
+      if (filtered.isSilentOnly) {
+        lines.push(chalk.dim("  · NO_REPLY"));
+      } else {
+        lines.push(...renderMarkdownToLines(filtered.text, contentWidth, "  "));
+      }
     }
     if (busy) {
       const dot = chalk.hex(COLOR_WORKING)(`● ${spinner} `);
@@ -700,6 +755,7 @@ Raccourcis clavier & souris:
   Molette / PgUp / PgDn      Défiler dans la discussion
   Ctrl+V                     Joindre image/PDF/fichier du presse-papiers (ou coller du texte)
   /archive                   Archiver la session courante
+  Ctrl+F                     Rechercher dans la conversation active
   Ctrl+O                     Déplier / replier les commandes exécutées par l'agent
   Ctrl+S / Ctrl+A / /sessions Menu complet des onglets de session avec badges
   Ctrl+L / /model            Sélecteur de modèle / provider LLM
@@ -783,6 +839,12 @@ interface LiveTool {
   status: string;
 }
 
+interface Draft {
+  text: string;
+  cursor: number;
+  attachments: PendingAttachment[];
+}
+
 interface CachedSession {
   entries: StaticEntry[];
   commands: SlashCommand[];
@@ -861,6 +923,10 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const [completedAgentIds, setCompletedAgentIds] = useState<Set<string>>(() => new Set());
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
   const timelineCacheRef = useRef<Map<string, CachedSession>>(new Map());
+  const draftsRef = useRef<Map<string, Draft>>(new Map());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMatchIdx, setSearchMatchIdx] = useState(0);
 
   const activeAgent = useMemo(
     () => agents.find((a) => a.id === activeAgentId),
@@ -912,8 +978,13 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       });
     }
     if (a.trim()) {
+      const filtered = filterNoReply(a);
       seqRef.current += 1;
-      additions.push({ key: `live-${seqRef.current}`, kind: "assistant", text: a });
+      additions.push({
+        key: `live-${seqRef.current}`,
+        kind: filtered.isSilentOnly ? "notice" : "assistant",
+        text: filtered.isSilentOnly ? "NO_REPLY" : filtered.text,
+      });
     }
     if (additions.length > 0) {
       setStaticItems((prev) => [...prev, ...additions]);
@@ -1065,6 +1136,12 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
               for (const id of newlyDone) next.add(id);
               return next;
             });
+            for (const doneId of newlyDone) {
+              const doneAgent = list.find((a) => a.id === doneId);
+              if (doneAgent) {
+                sendDesktopNotification("hermes-tui", `✓ ${doneAgent.title} a terminé`);
+              }
+            }
           }
           setAgents(list);
           return;
@@ -1220,6 +1297,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             });
             setModal("permission");
             setModalIdx(0);
+            const permAgent = agentsRef.current.find((a) => a.id === msg.agentId);
+            sendDesktopNotification(
+              "hermes-tui — Permission requise",
+              `${permAgent?.title ?? "Agent"} : ${ev.request.title || ev.request.name || "Action"}`
+            );
           } else if (ev.type === "permission_resolved") {
             setPermission(null);
             setModal((prev) => (prev === "permission" ? "none" : prev));
@@ -1329,6 +1411,25 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       return;
     }
     const target = agentsRef.current.find((a) => a.id === id);
+    if (prevId) {
+      if (inputRef.current || attachmentsRef.current.length > 0) {
+        draftsRef.current.set(prevId, {
+          text: inputRef.current,
+          cursor: cursorRef.current,
+          attachments: attachmentsRef.current,
+        });
+      } else {
+        draftsRef.current.delete(prevId);
+      }
+    }
+    const nextDraft = draftsRef.current.get(id);
+    if (nextDraft) {
+      setPrompt(nextDraft.text, nextDraft.cursor);
+      setAttachments(nextDraft.attachments);
+    } else {
+      setPrompt("", 0);
+      setAttachments([]);
+    }
     pendingSwitchIdRef.current = id;
     activeAgentIdRef.current = id;
     setActiveAgentId(id);
@@ -1555,6 +1656,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const topBarHeight = topTabs.rows.length + 1 + (hasTopInfoLine ? 1 : 0); // tab rows + optional info line + borderBottom
   const promptHeight = 2 + visiblePromptRows + (attachments.length > 0 ? 1 : 0); // borderTop + lines + borderBottom + attachments row
   const statusBarHeight = 1;
+  const searchHeight = searchOpen ? 1 : 0;
   const slashHeight = slashSuggestions.length > 0 ? slashSuggestions.length + 2 : 0;
 
   let modalHeight = 0;
@@ -1570,7 +1672,10 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     modalHeight = permission.options.length + 3 + (permission.description ? 1 : 0);
   }
 
-  const viewportHeight = Math.max(4, rootHeight - topBarHeight - promptHeight - statusBarHeight - slashHeight - modalHeight);
+  const viewportHeight = Math.max(
+    4,
+    rootHeight - topBarHeight - promptHeight - statusBarHeight - searchHeight - slashHeight - modalHeight
+  );
   const maxScroll = Math.max(0, conversationLines.length - viewportHeight);
   const effectiveScroll = Math.min(scrollOffset, maxScroll);
   const sliceEnd = Math.max(0, conversationLines.length - effectiveScroll);
@@ -1582,9 +1687,47 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       ? [...Array(viewportHeight - visibleConversation.length).fill(""), ...visibleConversation]
       : visibleConversation;
 
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!searchOpen || !q) return [] as number[];
+    const matches: number[] = [];
+    for (let i = 0; i < conversationLines.length; i++) {
+      if (stripAnsi(conversationLines[i]).toLowerCase().includes(q)) {
+        matches.push(i);
+      }
+    }
+    return matches;
+  }, [conversationLines, searchOpen, searchQuery]);
+
+  function jumpToSearchLine(lineIdx: number): void {
+    const desiredEnd = Math.min(conversationLines.length, lineIdx + Math.ceil(viewportHeight / 2));
+    const nextScroll = Math.max(0, Math.min(maxScroll, conversationLines.length - desiredEnd));
+    setScrollOffset(nextScroll);
+  }
+
   const displayedConversation = useMemo(() => {
+    let base = paddedConversation;
+
+    if (searchOpen && searchQuery.trim() && searchMatches.length > 0) {
+      const q = searchQuery.trim();
+      const qRe = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+      const activeLineIdx = searchMatches[((searchMatchIdx % searchMatches.length) + searchMatches.length) % searchMatches.length];
+      const padOffset = Math.max(0, viewportHeight - visibleConversation.length);
+      base = base.map((line, idx) => {
+        const convIdx = idx >= padOffset ? sliceStart + (idx - padOffset) : -1;
+        if (convIdx < 0) return line;
+        const plain = stripAnsi(line);
+        if (!qRe.test(plain)) return line;
+        qRe.lastIndex = 0;
+        const isCurrentMatch = convIdx === activeLineIdx;
+        return plain.replace(qRe, (m) =>
+          isCurrentMatch ? chalk.bgYellow.black.bold(m) : chalk.bgGray.whiteBright(m)
+        );
+      });
+    }
+
     if (!selection || (selection.r1 === selection.r2 && selection.c1 === selection.c2)) {
-      return paddedConversation;
+      return base;
     }
     const forward = selection.r1 < selection.r2 || (selection.r1 === selection.r2 && selection.c1 <= selection.c2);
     const startRow = forward ? selection.r1 : selection.r2;
@@ -1592,7 +1735,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     const endRow = forward ? selection.r2 : selection.r1;
     const endCol = forward ? selection.c2 : selection.c1;
 
-    return paddedConversation.map((line, idx) => {
+    return base.map((line, idx) => {
       const termRow = viewportStartRow + idx;
       if (termRow < startRow || termRow > endRow) return line;
       const plain = stripAnsi(line);
@@ -1604,7 +1747,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       const after = sliceCols(plain, toCol, Number.MAX_SAFE_INTEGER);
       return `${before}${chalk.bgHex("#3a3a3c").whiteBright(selected)}${after}`;
     });
-  }, [paddedConversation, selection, viewportStartRow]);
+  }, [paddedConversation, selection, viewportStartRow, searchOpen, searchQuery, searchMatches, searchMatchIdx, viewportHeight, visibleConversation.length, sliceStart]);
 
   function triggerClipboardPaste(): void {
     if (modal !== "none") return;
@@ -1769,6 +1912,62 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     if ((key.ctrl && char === "v") || char === "[118;6u" || char === "[86;6u") {
       triggerClipboardPaste();
       return;
+    }
+
+    if (key.ctrl && char === "f") {
+      setSearchOpen((open) => {
+        if (!open) {
+          setSearchMatchIdx(0);
+        }
+        return !open;
+      });
+      return;
+    }
+
+    if (searchOpen && modal === "none") {
+      if (key.escape) {
+        setSearchOpen(false);
+        return;
+      }
+      if (key.return || key.downArrow) {
+        if (searchMatches.length > 0) {
+          const next = (searchMatchIdx + 1) % searchMatches.length;
+          setSearchMatchIdx(next);
+          jumpToSearchLine(searchMatches[next]);
+        }
+        return;
+      }
+      if (key.upArrow) {
+        if (searchMatches.length > 0) {
+          const prev = (searchMatchIdx - 1 + searchMatches.length) % searchMatches.length;
+          setSearchMatchIdx(prev);
+          jumpToSearchLine(searchMatches[prev]);
+        }
+        return;
+      }
+      if (key.backspace || key.delete) {
+        const nextQ = searchQuery.slice(0, -1);
+        setSearchQuery(nextQ);
+        setSearchMatchIdx(0);
+        return;
+      }
+      if (char && !key.ctrl && !key.meta) {
+        const nextQ = searchQuery + char;
+        setSearchQuery(nextQ);
+        const q = nextQ.trim().toLowerCase();
+        if (q) {
+          const matched = conversationLines.reduce<number[]>((acc, l, i) => {
+            if (stripAnsi(l).toLowerCase().includes(q)) acc.push(i);
+            return acc;
+          }, []);
+          if (matched.length > 0) {
+            const lastIdx = matched.length - 1;
+            setSearchMatchIdx(lastIdx);
+            jumpToSearchLine(matched[lastIdx]);
+          }
+        }
+        return;
+      }
     }
 
     if (key.ctrl && (char === "a" || char === "s")) {
@@ -2187,6 +2386,25 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
               </Text>
             );
           })}
+        </Box>
+      )}
+
+      {searchOpen && (
+        <Box height={1} paddingX={1} overflow="hidden" justifyContent="space-between">
+          <Text wrap="truncate-end">
+            <Text color="yellow" bold>
+              🔍{" "}
+            </Text>
+            <Text>{searchQuery}</Text>
+            <Text color="yellow">█</Text>
+          </Text>
+          <Text dimColor>
+            {searchQuery.trim()
+              ? searchMatches.length > 0
+                ? `${((searchMatchIdx % searchMatches.length) + searchMatches.length) % searchMatches.length + 1}/${searchMatches.length} · Entrée/↑↓ naviguer · Esc fermer`
+                : "0 résultat · Esc fermer"
+              : "Taper pour chercher · Esc fermer"}
+          </Text>
         </Box>
       )}
 
