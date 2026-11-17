@@ -2421,6 +2421,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       {/* Minimalist prompt box with Yoga-managed top/bottom borders */}
       <Box
         flexDirection="column"
+        flexShrink={0}
         borderStyle="single"
         borderTop
         borderBottom
@@ -2447,16 +2448,10 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const before = hasCursor ? l.text.slice(0, rel) : l.text;
             const curChar = hasCursor ? (rel < l.text.length ? chalk.inverse(l.text[rel]) : chalk.cyan("█")) : "";
             const after = hasCursor && rel < l.text.length ? l.text.slice(rel + 1) : "";
+            const prefixStr = (busy ? chalk.bold.yellow : chalk.bold.cyan)(l.idx === 0 ? "> " : "  ");
             return (
-              <Box key={`prompt-line-${l.idx}`} width="100%" height={1} overflow="hidden">
-                <Text>
-                  <Text color={busy ? "yellow" : "cyan"} bold>
-                    {l.idx === 0 ? "> " : "  "}
-                  </Text>
-                  {before}
-                  {curChar}
-                  {after}
-                </Text>
+              <Box key={`prompt-line-${l.idx}`} width="100%" height={1}>
+                <Text>{`${prefixStr}${before}${curChar}${after}`}</Text>
               </Box>
             );
           });
