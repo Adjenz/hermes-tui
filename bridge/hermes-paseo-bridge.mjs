@@ -68,6 +68,7 @@ function compactAgent(entry) {
     persistence: a.persistence ?? null,
     archivedAt: a.archivedAt ?? null,
     requiresAttention: Boolean(a.requiresAttention),
+    lastUsage: a.lastUsage ?? null,
     pendingPermissions: a.pendingPermissions ?? [],
   };
 }

@@ -19,6 +19,14 @@ export interface HermesMode {
   description?: string;
 }
 
+export interface AgentUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  contextWindowMaxTokens?: number;
+  contextWindowUsedTokens?: number;
+}
+
 export interface HermesAgent {
   id: string;
   title: string;
@@ -33,6 +41,7 @@ export interface HermesAgent {
   thinkingOptionId: string | null;
   updatedAt: string;
   requiresAttention: boolean;
+  lastUsage?: AgentUsage | null;
 }
 
 export interface SlashCommand {

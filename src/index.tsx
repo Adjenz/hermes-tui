@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { spawn as spawnProc } from "node:child_process";
 import stringWidth from "string-width";
 import type {
+  AgentUsage,
   HermesAgent,
   HermesModel,
   PermissionPrompt,
@@ -232,6 +233,30 @@ function cleanupTerminalScreen(): void {
   if (!terminalInitialized || !process.stdout.isTTY) return;
   terminalInitialized = false;
   process.stdout.write("\x1b[?2004l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1049l\x1b]2;\x07");
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (n >= 1_000) {
+    return `${Math.round(n / 1_000)}k`;
+  }
+  return String(n);
+}
+
+function formatContextUsage(usage: AgentUsage | null | undefined): { label: string; color?: string } | null {
+  if (!usage) return null;
+  const used = usage.contextWindowUsedTokens ?? usage.inputTokens;
+  const max = usage.contextWindowMaxTokens;
+  if (typeof used !== "number" || used <= 0) return null;
+  if (typeof max === "number" && max > 0) {
+    const pct = Math.min(100, Math.round((used / max) * 100));
+    const color = pct >= 85 ? "red" : pct >= 60 ? "yellow" : undefined;
+    return { label: `${formatTokens(used)}/${formatTokens(max)} (${pct}%)`, color };
+  }
+  return { label: `${formatTokens(used)} ctx` };
 }
 
 function getPersonaIcon(agent: HermesAgent | undefined): string {
@@ -1957,6 +1982,16 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             {" "}
             · {(activeAgent?.model ?? "—").split(":").pop()} ({activeAgent?.thinkingOptionId ?? "default"})
           </Text>
+          {(() => {
+            const ctx = formatContextUsage(activeAgent?.lastUsage);
+            if (!ctx) return null;
+            return (
+              <Text color={ctx.color} dimColor={!ctx.color}>
+                {" "}
+                · {ctx.label}
+              </Text>
+            );
+          })()}
         </Text>
       </Box>
     </Box>
