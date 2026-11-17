@@ -278,16 +278,30 @@ function sendDesktopNotification(title: string, body: string): void {
 
 const SILENCE_MARKER_RE = /^[*_`.~]*(?:\[?SILENT\]?|NO[_\s]REPLY)[*_`.~]*$/i;
 const HERMES_SILENCE_WARNING_RE = /^⚠️?\s*The model returned only a silence marker.*$/i;
-const HERMES_REASONING_BLOCK_RE = /(?:^|\n)\s*💭\s*Reasoning:\s*\n\s*╭[\s\S]*?╰[─━]*╯\s*(?=\n|$)/g;
+const HERMES_REASONING_CLOSED_RE = /(?:^|\n)[ \t]*💭\s*Reasoning:\s*\n[ \t]*╭[\s\S]*?╰[─━\s]*╯[ \t]*(?=\n|$)/g;
+const HERMES_REASONING_OPEN_RE = /(?:^|\n)[ \t]*💭\s*Reasoning:[\s\S]*$/;
+
+function stripEmbeddedReasoning(rawText: string): string {
+  return rawText
+    .replace(/\r\n/g, "\n")
+    .replace(HERMES_REASONING_CLOSED_RE, "\n")
+    .replace(HERMES_REASONING_OPEN_RE, "");
+}
 
 function filterNoReply(rawText: string): { isSilentOnly: boolean; text: string } {
-  const withoutReasoning = rawText.replace(/\r\n/g, "\n").replace(HERMES_REASONING_BLOCK_RE, "\n");
+  const withoutReasoning = stripEmbeddedReasoning(rawText);
   const cleanedLines = withoutReasoning
     .split("\n")
     .filter((l) => !HERMES_SILENCE_WARNING_RE.test(l.trim()));
   const withoutWarning = cleanedLines.join("\n");
   const trimmed = withoutWarning.trim();
-  if (!trimmed) return { isSilentOnly: false, text: rawText };
+  if (!trimmed) {
+    // If rawText had an embedded reasoning block and nothing else yet, hide it while streaming
+    if (withoutReasoning.trim() !== rawText.trim()) {
+      return { isSilentOnly: true, text: "" };
+    }
+    return { isSilentOnly: false, text: rawText };
+  }
   if (SILENCE_MARKER_RE.test(trimmed)) {
     return { isSilentOnly: true, text: "" };
   }
@@ -298,7 +312,7 @@ function filterNoReply(rawText: string): { isSilentOnly: boolean; text: string }
     if (!cleaned.trim()) return { isSilentOnly: true, text: "" };
     return { isSilentOnly: false, text: cleaned };
   }
-  return { isSilentOnly: false, text: rawText };
+  return { isSilentOnly: false, text: withoutReasoning };
 }
 
 function colorizeToolOutputLine(ol: string, isEdit: boolean): string {
@@ -482,11 +496,13 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
     if (assistantAcc.trim()) {
       flushWorkGroup();
       const filtered = filterNoReply(assistantAcc.replace(/^\n+/, ""));
-      entries.push({
-        key: `${epoch}-a-${idx++}`,
-        kind: filtered.isSilentOnly ? "notice" : "assistant",
-        text: filtered.isSilentOnly ? "NO_REPLY" : filtered.text,
-      });
+      if (!filtered.isSilentOnly && filtered.text.trim()) {
+        entries.push({
+          key: `${epoch}-a-${idx++}`,
+          kind: "assistant",
+          text: filtered.text,
+        });
+      }
     }
     assistantAcc = "";
   };
@@ -600,9 +616,7 @@ function buildConversationLines(
     }
     if (liveAssistant) {
       const filtered = filterNoReply(liveAssistant.replace(/^\n+/, ""));
-      if (filtered.isSilentOnly) {
-        lines.push(chalk.dim("  · NO_REPLY"));
-      } else {
+      if (!filtered.isSilentOnly && filtered.text.trim()) {
         lines.push(...renderMarkdownToLines(filtered.text, contentWidth, "  "));
       }
     }
@@ -986,12 +1000,14 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     }
     if (a.trim()) {
       const filtered = filterNoReply(a);
-      seqRef.current += 1;
-      additions.push({
-        key: `live-${seqRef.current}`,
-        kind: filtered.isSilentOnly ? "notice" : "assistant",
-        text: filtered.isSilentOnly ? "NO_REPLY" : filtered.text,
-      });
+      if (!filtered.isSilentOnly && filtered.text.trim()) {
+        seqRef.current += 1;
+        additions.push({
+          key: `live-${seqRef.current}`,
+          kind: "assistant",
+          text: filtered.text,
+        });
+      }
     }
     if (additions.length > 0) {
       setStaticItems((prev) => [...prev, ...additions]);
