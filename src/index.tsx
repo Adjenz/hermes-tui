@@ -480,7 +480,8 @@ function buildConversationLines(
   busy: boolean,
   spinner: string,
   showDetails: boolean,
-  contentWidth: number
+  contentWidth: number,
+  isThinking: boolean = false
 ): string[] {
   const lines: string[] = [];
   const ruleLen = Math.max(20, Math.min(contentWidth, 64));
@@ -542,19 +543,23 @@ function buildConversationLines(
       lines.push(...renderMarkdownToLines(liveAssistant.replace(/^\n+/, ""), contentWidth, "  "));
     }
     if (busy) {
-      const latest = liveSteps[liveSteps.length - 1];
       const dot = chalk.hex(COLOR_WORKING)(`● ${spinner} `);
-      const liveBudget = Math.max(24, contentWidth - 40 - (latest?.toolName.length ?? 0));
-      const stepInfo = latest
-        ? ` ${chalk.bold.yellow(latest.toolName)}(${latest.title.slice(0, liveBudget)}${latest.title.length > liveBudget ? "…" : ""})${
-            liveSteps.length > 1 ? ` +${liveSteps.length - 1}` : ""
-          }`
-        : "";
-      lines.push(
-        `${dot}${chalk.hex(COLOR_DONE)("Working…")}${stepInfo}${chalk.dim(
-          ` (ctrl+o ${showDetails ? "to collapse" : "to expand"} · esc to stop)`
-        )}`
-      );
+      if (isThinking) {
+        lines.push(`${dot}${chalk.cyan("Thinking…")}${chalk.dim(" (esc to stop)")}`);
+      } else {
+        const latest = liveSteps[liveSteps.length - 1];
+        const liveBudget = Math.max(24, contentWidth - 40 - (latest?.toolName.length ?? 0));
+        const stepInfo = latest
+          ? ` ${chalk.bold.yellow(latest.toolName)}(${latest.title.slice(0, liveBudget)}${latest.title.length > liveBudget ? "…" : ""})${
+              liveSteps.length > 1 ? ` +${liveSteps.length - 1}` : ""
+            }`
+          : "";
+        lines.push(
+          `${dot}${chalk.hex(COLOR_DONE)("Working…")}${stepInfo}${chalk.dim(
+            ` (ctrl+o ${showDetails ? "to collapse" : "to expand"} · esc to stop)`
+          )}`
+        );
+      }
     }
   }
 
@@ -804,6 +809,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const [liveAssistant, setLiveAssistant] = useState("");
   const [liveTools, setLiveTools] = useState<LiveTool[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
 
   const [input, setInput] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -898,6 +904,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setLiveTools([]);
     setLiveAssistant("");
     setIsStreaming(false);
+    setIsThinking(false);
   }
 
   function resetToAgentTimeline(agent: HermesAgent | undefined, timeline: TimelineItem[], cmds: SlashCommand[]): void {
@@ -905,6 +912,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setLiveAssistant("");
     setLiveTools([]);
     setIsStreaming(agent?.status === "running");
+    setIsThinking(false);
     setScrollOffset(0);
 
     const entries = timelineToStaticEntries(timeline, nextEpoch);
@@ -1065,6 +1073,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
           if (ev.type === "turn_started") {
             setIsStreaming(true);
+            setIsThinking(false);
             setLiveAssistant("");
             setLiveTools([]);
             setCompletedAgentIds((prev) => {
@@ -1081,10 +1090,13 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
               setScrollOffset(0);
             } else if (item.type === "reasoning") {
               setIsStreaming(true);
+              setIsThinking(true);
             } else if (item.type === "assistant_message" && item.text) {
               setIsStreaming(true);
+              setIsThinking(false);
               setLiveAssistant((prev) => prev + item.text);
             } else if (item.type === "tool_call") {
+              setIsThinking(false);
               const step = extractToolStep(item);
               if (step) {
                 const callId = item.callId || `tool-${Date.now()}`;
@@ -1414,8 +1426,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   );
   // Live part (streaming tokens/tools) with a spinner placeholder swapped in cheaply at render time.
   const liveLines = useMemo(
-    () => buildConversationLines([], liveTools, liveAssistant, busy, "\u0001", showDetails, contentWidth),
-    [liveTools, liveAssistant, busy, showDetails, contentWidth]
+    () => buildConversationLines([], liveTools, liveAssistant, busy, "\u0001", showDetails, contentWidth, isThinking),
+    [liveTools, liveAssistant, busy, showDetails, contentWidth, isThinking]
   );
   const conversationLines = useMemo(() => {
     const live = busy ? liveLines.map((l) => (l.includes("\u0001") ? l.replace("\u0001", spinner) : l)) : liveLines;
