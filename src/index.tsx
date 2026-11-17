@@ -278,10 +278,11 @@ function sendDesktopNotification(title: string, body: string): void {
 
 const SILENCE_MARKER_RE = /^[*_`.~]*(?:\[?SILENT\]?|NO[_\s]REPLY)[*_`.~]*$/i;
 const HERMES_SILENCE_WARNING_RE = /^⚠️?\s*The model returned only a silence marker.*$/i;
+const HERMES_REASONING_BLOCK_RE = /(?:^|\n)\s*💭\s*Reasoning:\s*\n\s*╭[\s\S]*?╰[─━]*╯\s*(?=\n|$)/g;
 
 function filterNoReply(rawText: string): { isSilentOnly: boolean; text: string } {
-  const cleanedLines = rawText
-    .replace(/\r\n/g, "\n")
+  const withoutReasoning = rawText.replace(/\r\n/g, "\n").replace(HERMES_REASONING_BLOCK_RE, "\n");
+  const cleanedLines = withoutReasoning
     .split("\n")
     .filter((l) => !HERMES_SILENCE_WARNING_RE.test(l.trim()));
   const withoutWarning = cleanedLines.join("\n");
