@@ -1391,7 +1391,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const slashSuggestions = useMemo(() => {
     if (!input.startsWith("/") || input.includes(" ") || modal !== "none") return [];
     const q = input.slice(1).toLowerCase();
-    return allSlashCommands.filter((c) => c.name.toLowerCase().startsWith(q) || c.description.toLowerCase().includes(q)).slice(0, 10);
+    const starts = allSlashCommands.filter((c) => c.name.toLowerCase().startsWith(q));
+    const descOnly = allSlashCommands.filter(
+      (c) => !c.name.toLowerCase().startsWith(q) && c.description.toLowerCase().includes(q)
+    );
+    return [...starts.sort((a, b) => (a.name.toLowerCase() === q ? -1 : b.name.toLowerCase() === q ? 1 : 0)), ...descOnly].slice(0, 10);
   }, [input, modal, allSlashCommands]);
 
   const filteredAgents = useMemo(() => {
@@ -2161,8 +2165,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         return;
       }
       if (key.return) {
+        const isExactCmd = allSlashCommands.some((c) => `/${c.name.toLowerCase()}` === input.toLowerCase());
         const picked = slashSuggestions[slashIdx];
-        if (picked && input !== `/${picked.name}` && picked.isLocal && !picked.argumentHint) {
+        if (!isExactCmd && picked && input !== `/${picked.name}` && picked.isLocal && !picked.argumentHint) {
           handleSubmitLine(`/${picked.name}`);
           return;
         }
