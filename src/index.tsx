@@ -1216,11 +1216,15 @@ async function runCheck(): Promise<number> {
   const commands = (result.commands as SlashCommand[]) ?? [];
   const activeId = result.activeAgentId as string | null;
   const active = agents.find((a) => a.id === activeId);
+  const contract = (result.contract as { ok?: boolean; missingRequired?: string[]; missingOptional?: string[] }) ?? {
+    ok: true,
+  };
 
   console.log(
     JSON.stringify(
       {
-        ok: true,
+        ok: Boolean(contract.ok),
+        contract,
         agentsCount: agents.length,
         activeAgent: active ? { id: active.id, title: active.title, status: active.status, model: active.model } : null,
         modelsCount: models.length,
@@ -1230,7 +1234,7 @@ async function runCheck(): Promise<number> {
       2
     )
   );
-  return 0;
+  return contract.ok === false ? 1 : 0;
 }
 
 type ModalKind = "none" | "agents" | "models" | "thinking" | "modes" | "permission";

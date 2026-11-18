@@ -1,10 +1,13 @@
 {
   "name": "hermes-tui",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
-  "description": "Modern React + Ink TUI for Hermes Agent with remote control via the Paseo daemon",
+  "description": "Modern React + Ink TUI for persistent Hermes Agents with multi-role visibility and remote control via Paseo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Adjenz/hermes-tui.git"
+  },
   "bin": {
     "htui": "./bin/htui.mjs",
     "hermes-tui": "./bin/htui.mjs"

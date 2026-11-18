@@ -106,11 +106,48 @@ function sortHermesAgents(entries) {
     });
 }
 
+const REQUIRED_CLIENT_METHODS = [
+  "fetchAgents",
+  "observeAgents",
+  "fetchAgentTimeline",
+  "subscribeAgentTimeline",
+  "sendAgentMessage",
+  "createWorkspace",
+  "createAgent",
+  "archiveAgent",
+  "updateAgent",
+];
+
+const OPTIONAL_CLIENT_METHODS = [
+  "fetchWorkspaces",
+  "observeWorkspaces",
+  "archiveWorkspace",
+  "setWorkspaceTitle",
+  "clearAgentAttention",
+  "clearWorkspaceAttention",
+];
+
+function checkClientContract(client) {
+  const missingRequired = REQUIRED_CLIENT_METHODS.filter((m) => typeof client?.[m] !== "function");
+  const missingOptional = OPTIONAL_CLIENT_METHODS.filter((m) => typeof client?.[m] !== "function");
+  return {
+    ok: missingRequired.length === 0,
+    missingRequired,
+    missingOptional,
+  };
+}
+
 async function main() {
   const connectToDaemon = await loadConnectToDaemon();
   const client = await connectToDaemon({
     target: { kind: "instance", home: PASEO_HOME },
   });
+  const contract = checkClientContract(client);
+  if (!contract.ok) {
+    throw new Error(
+      `Incompatible @getpaseo/cli client contract — missing required methods: ${contract.missingRequired.join(", ")}`
+    );
+  }
 
   let agentsMap = new Map();
   let cachedModels = null;
@@ -450,6 +487,7 @@ async function main() {
         activeAgentId: requestedId,
         timeline,
         commands,
+        contract,
       });
       return;
     }

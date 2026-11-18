@@ -10,8 +10,13 @@ A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s def
 
 ## Why `hermes-tui`?
 
+> **What was missing wasn't just another TUI** — there are plenty of terminal chat clients out there. What was missing was a TUI built on top of **persistent agents**, with **multiple distinct roles visible at a glance**, their **live state**, and **remote control** across devices.
+>
+> Instead of reinventing the agent runtime or the sync layer, `hermes-tui` relies on a proven core (**Hermes** for agent execution, tools & memory; **Paseo** for multi-device session orchestration) and focuses purely on being the fastest, sharpest terminal view on top.
+
 - **A real TUI replacement for Hermes:** clean, `agy` / `opencode`-inspired layout with theme-adaptive terminal colors, Unicode Markdown tables, framed code blocks, wrapped lists, and zero text clipping.
-- **Native Remote Control via Paseo:** your agents stay alive on your server under the Paseo daemon (`~/.paseo`). Connect from any workstation over SSH with automatic reconnect after sleep or network drops, and stay synchronized in real time with Paseo Desktop/Mobile.
+- **Multi-role persistent agents at a glance:** view all your specialized agents (e.g., *Execution*, *Planning/Gatekeeper*, *Security/Watch*) and their topic sessions in a pinned multi-row header, with live status badges (`working`, `done/unread`, `idle`) and instant inter-agent message forwarding (`/to <session>`).
+- **Native Remote Control via Paseo:** your agents stay alive on your server under the Paseo daemon (`~/.paseo`). Connect from any workstation over SSH with automatic reconnect after sleep or network drops, and stay 100% synchronized in real time with Paseo Desktop & Mobile (workspaces, titles, unread badges, and archives stay aligned across every device).
 - **Multi-session tab bar at the top:** sessions grouped by agent, clickable directly with the mouse, with live status badges:
   - `⠋` **orange**: running (*working*)
   - `●` **green**: turn finished (*terminé*)
@@ -89,7 +94,8 @@ htui --check
 ### Requirements
 
 - **Client:** Node.js ≥ 18; on Linux/Wayland, `wl-clipboard` (`wl-paste` / `wl-copy`) for `Ctrl+V` file/image attachments and clipboard copy (`OSC 52` is also emitted as fallback).
-- **Host running Paseo:** Node.js, `@getpaseo/cli` installed, and the Paseo daemon running (`~/.paseo`).
+- **Host running Paseo:** Node.js, `@getpaseo/cli` (tested against `0.15.x` – `0.16.x`; pin your `@getpaseo/cli` version on the server to avoid unexpected internal client changes), and the Paseo daemon running (`~/.paseo`).
+- **Healthcheck / Contract verification:** `htui --check` verifies both SSH/daemon connectivity and the `@getpaseo/cli` client method contract (`contract.ok`), making it suitable for a daily cron healthcheck after server updates.
 
 ---
 
