@@ -1015,6 +1015,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     if (additions.length > 0) {
       setStaticItems((prev) => [...prev, ...additions]);
     }
+    liveToolsRef.current = [];
+    liveAssistantRef.current = "";
     setLiveTools([]);
     setLiveAssistant("");
     setIsStreaming(false);
@@ -1145,16 +1147,28 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           const newlyDone: string[] = [];
           const nowRunning: string[] = [];
 
+          let activeFinished = false;
           for (const a of list) {
             nextMap.set(a.id, a.status);
             const prevStatus = prevMap.get(a.id);
             if (a.status === "running") {
               nowRunning.push(a.id);
-            } else if (prevStatus === "running" && a.id !== activeAgentIdRef.current) {
+            } else if (a.id === activeAgentIdRef.current) {
+              if (
+                prevStatus === "running" ||
+                liveAssistantRef.current.trim().length > 0 ||
+                liveToolsRef.current.length > 0
+              ) {
+                activeFinished = true;
+              }
+            } else if (prevStatus === "running") {
               newlyDone.push(a.id);
             }
           }
           prevStatusesRef.current = nextMap;
+          if (activeFinished) {
+            flushLiveTurnToStatic();
+          }
           if (newlyDone.length > 0 || nowRunning.length > 0) {
             setCompletedAgentIds((prev) => {
               const next = new Set(prev);
@@ -1236,6 +1250,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           if (!ev) return;
 
           if (ev.type === "turn_started") {
+            if (liveAssistantRef.current.trim().length > 0 || liveToolsRef.current.length > 0) {
+              flushLiveTurnToStatic();
+            }
             setIsStreaming(true);
             setIsThinking(false);
             setLiveAssistant("");
