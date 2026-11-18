@@ -864,6 +864,7 @@ interface Draft {
   text: string;
   cursor: number;
   attachments: PendingAttachment[];
+  pastedTexts: Array<[string, string]>;
 }
 
 interface CachedSession {
@@ -945,6 +946,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
   const timelineCacheRef = useRef<Map<string, CachedSession>>(new Map());
   const draftsRef = useRef<Map<string, Draft>>(new Map());
+  const pastedTextsRef = useRef<Map<string, string>>(new Map());
+  const pasteSeqRef = useRef(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMatchIdx, setSearchMatchIdx] = useState(0);
@@ -1441,6 +1444,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           text: inputRef.current,
           cursor: cursorRef.current,
           attachments: attachmentsRef.current,
+          pastedTexts: Array.from(pastedTextsRef.current.entries()),
         });
       } else {
         draftsRef.current.delete(prevId);
@@ -1448,9 +1452,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     }
     const nextDraft = draftsRef.current.get(id);
     if (nextDraft) {
+      pastedTextsRef.current = new Map(nextDraft.pastedTexts);
       setPrompt(nextDraft.text, nextDraft.cursor);
       setAttachments(nextDraft.attachments);
     } else {
+      pastedTextsRef.current = new Map();
       setPrompt("", 0);
       setAttachments([]);
     }
@@ -1497,12 +1503,37 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setPrompt(curText.slice(0, pos) + addition + curText.slice(pos), pos + addition.length);
   }
 
+  function insertSmartPaste(rawText: string): void {
+    const normalized = rawText.replace(/\r\n/g, "\n");
+    if (!normalized) return;
+    const lineCount = normalized.split("\n").length;
+    if (lineCount >= 4 || normalized.length >= 250) {
+      pasteSeqRef.current += 1;
+      const id = pasteSeqRef.current;
+      const label =
+        lineCount >= 4
+          ? `[Pasted #${id} +${lineCount} lines]`
+          : `[Pasted #${id} · ${normalized.length} chars]`;
+      pastedTextsRef.current.set(label, normalized);
+      insertAtCursor(label);
+    } else {
+      insertAtCursor(normalized);
+    }
+  }
+
   function handleSubmitLine(raw: string): void {
-    let trimmed = raw.trim();
+    let expanded = raw;
+    for (const [token, content] of pastedTextsRef.current.entries()) {
+      if (expanded.includes(token)) {
+        expanded = expanded.split(token).join(content);
+      }
+    }
+    let trimmed = expanded.trim();
     const pendingFiles = attachmentsRef.current;
     if (!trimmed && pendingFiles.length === 0) return;
     if (!trimmed) trimmed = pendingFiles.length > 1 ? "Voici les fichiers joints." : "Voici le fichier joint.";
 
+    pastedTextsRef.current.clear();
     setPromptHistory((prev) => [trimmed, ...prev.slice(0, 49)]);
     setHistoryIdx(-1);
     setPrompt("", 0);
@@ -1782,7 +1813,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           setAttachments((prev) => [...prev, ...got]);
           setStatusNotice(null);
         } else if (text) {
-          insertAtCursor(text.replace(/\r\n/g, "\n"));
+          insertSmartPaste(text);
           setStatusNotice(null);
         } else {
           setStatusNotice("Presse-papiers vide.");
@@ -1807,9 +1838,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         return;
       }
     }
-    const singleLine = clean.replace(/\r\n/g, "\n");
-    if (singleLine) {
-      insertAtCursor(singleLine);
+    const normalized = clean.replace(/\r\n/g, "\n");
+    if (normalized) {
+      insertSmartPaste(normalized);
       setSlashIdx(0);
     }
   }
@@ -2242,6 +2273,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             return;
           }
         }
+        insertSmartPaste(char);
+        setSlashIdx(0);
+        return;
       }
       insertAtCursor(char);
       setSlashIdx(0);
@@ -2473,9 +2507,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const curChar = hasCursor ? (rel < l.text.length ? chalk.inverse(l.text[rel]) : chalk.cyan("█")) : "";
             const after = hasCursor && rel < l.text.length ? l.text.slice(rel + 1) : "";
             const prefixStr = (busy ? chalk.bold.yellow : chalk.bold.cyan)(l.idx === 0 ? "> " : "  ");
+            const colorPasted = (seg: string) =>
+              seg.replace(/(\[Pasted #\d+[^\]]*\])/g, (_, m: string) => chalk.cyan(m));
             return (
               <Box key={`prompt-line-${l.idx}`} width="100%" height={1}>
-                <Text>{`${prefixStr}${before}${curChar}${after}`}</Text>
+                <Text>{`${prefixStr}${colorPasted(before)}${curChar}${colorPasted(after)}`}</Text>
               </Box>
             );
           });
