@@ -394,15 +394,30 @@ async function main() {
       const refEntry = msg.fromAgentId ? agentsMap.get(msg.fromAgentId) : null;
       const ref = refEntry ? compactAgent(refEntry) : null;
       const cwd = msg.cwd || ref?.cwd || os.homedir();
-      const created = await client.createAgent({
-        provider: "hermes",
-        cwd,
-        ...(msg.title ? { title: msg.title } : {}),
-        ...(ref?.workspaceId ? { workspaceId: ref.workspaceId } : {}),
-        ...(ref?.model ? { model: ref.model } : {}),
-        ...(ref?.thinkingOptionId ? { thinkingOptionId: ref.thinkingOptionId } : {}),
-        ...(ref?.modeId ? { modeId: ref.modeId } : {}),
+      const wsTitle = (msg.title || "").split(" - ").slice(1).join(" - ").trim() || msg.title || "Session";
+      const wsRes = await client.createWorkspace({
+        source: { kind: "directory", path: cwd },
+        title: wsTitle,
+        agent: {
+          provider: "hermes",
+          cwd,
+          ...(msg.title ? { title: msg.title } : {}),
+          ...(ref?.model ? { model: ref.model } : {}),
+          ...(ref?.thinkingOptionId ? { thinkingOptionId: ref.thinkingOptionId } : {}),
+          ...(ref?.modeId ? { modeId: ref.modeId } : {}),
+        },
       });
+      const created =
+        wsRes.agent ??
+        (await client.createAgent({
+          provider: "hermes",
+          cwd,
+          ...(wsRes.workspace?.id ? { workspaceId: wsRes.workspace.id } : {}),
+          ...(msg.title ? { title: msg.title } : {}),
+          ...(ref?.model ? { model: ref.model } : {}),
+          ...(ref?.thinkingOptionId ? { thinkingOptionId: ref.thinkingOptionId } : {}),
+          ...(ref?.modeId ? { modeId: ref.modeId } : {}),
+        }));
       await refreshAgentsList(true);
       const newId = created.id;
       void subscribeToAgent(newId);
