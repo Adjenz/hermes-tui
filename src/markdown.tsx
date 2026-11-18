@@ -346,7 +346,98 @@ function formatTextLine(line: string, maxWidth: number): string {
   return wrapAnsiText(formatInlineMarkdown(line), maxWidth);
 }
 
-function renderTableLines(headers: string[], rows: string[][]): string[] {
+function wrapTableCell(cell: string, colWidth: number): string[] {
+  const limit = Math.max(1, colWidth);
+  if (visibleLength(cell) <= limit) return [cell];
+  const tokens = cell.split(/(\s+)/).filter((t) => t.length > 0);
+  const lines: string[] = [];
+  const activeCodes: string[] = [];
+  let curLine = "";
+  let curLen = 0;
+
+  const pushLine = () => {
+    const suffix = activeCodes.length > 0 ? "\x1b[0m" : "";
+    lines.push(curLine.replace(/\s+$/, "") + suffix);
+    curLine = activeCodes.join("");
+    curLen = 0;
+  };
+
+  for (const tok of tokens) {
+    if (/^\s+$/.test(tok)) {
+      if (curLen === 0) continue;
+      if (curLen + 1 <= limit) {
+        curLine += " ";
+        curLen += 1;
+      }
+      continue;
+    }
+    const tLen = visibleLength(tok);
+    if (curLen > 0 && curLen + tLen > limit) {
+      pushLine();
+    }
+    if (tLen > limit) {
+      const pieces = splitLongToken(tok, limit);
+      for (let p = 0; p < pieces.length; p++) {
+        if (p > 0) pushLine();
+        curLine += pieces[p];
+        curLen += visibleLength(pieces[p]);
+        updateSgrState(activeCodes, pieces[p]);
+      }
+    } else {
+      curLine += tok;
+      curLen += tLen;
+      updateSgrState(activeCodes, tok);
+    }
+  }
+  if (curLen > 0 || lines.length === 0) {
+    const suffix = activeCodes.length > 0 ? "\x1b[0m" : "";
+    lines.push(curLine.replace(/\s+$/, "") + suffix);
+  }
+  return lines;
+}
+
+function fitColumnWidths(naturalWidths: number[], maxWidth?: number): number[] {
+  const colCount = naturalWidths.length;
+  if (!maxWidth || colCount === 0) return naturalWidths;
+  const overhead = 3 * colCount + 1;
+  const totalNatural = naturalWidths.reduce((a, b) => a + b, 0) + overhead;
+  if (totalNatural <= maxWidth) return naturalWidths;
+
+  const availBudget = Math.max(colCount * 3, maxWidth - overhead);
+  const widths = [...naturalWidths];
+  const remaining = new Set<number>(naturalWidths.map((_, idx) => idx));
+  let budgetLeft = availBudget;
+
+  while (remaining.size > 0) {
+    const fair = Math.max(3, Math.floor(budgetLeft / remaining.size));
+    let lockedAny = false;
+    for (const c of Array.from(remaining)) {
+      if (widths[c] <= fair) {
+        budgetLeft -= widths[c];
+        remaining.delete(c);
+        lockedAny = true;
+      }
+    }
+    if (!lockedAny) {
+      const remCols = Array.from(remaining);
+      const remNaturalSum = remCols.reduce((acc, c) => acc + widths[c], 0) || 1;
+      let allocated = 0;
+      remCols.forEach((c, idx) => {
+        if (idx === remCols.length - 1) {
+          widths[c] = Math.max(3, budgetLeft - allocated);
+        } else {
+          const share = Math.max(3, Math.floor((widths[c] / remNaturalSum) * budgetLeft));
+          widths[c] = share;
+          allocated += share;
+        }
+      });
+      break;
+    }
+  }
+  return widths;
+}
+
+function renderTableLines(headers: string[], rows: string[][], maxWidth?: number): string[] {
   const colCount = Math.max(headers.length, ...rows.map((r) => r.length), 1);
   const formattedHeaders = Array.from({ length: colCount }, (_, c) =>
     chalk.bold.whiteBright(stripAnsi(formatInlineMarkdown(headers[c] ?? "")))
@@ -355,49 +446,72 @@ function renderTableLines(headers: string[], rows: string[][]): string[] {
     Array.from({ length: colCount }, (_, c) => formatInlineMarkdown(row[c] ?? ""))
   );
 
-  const widths = Array.from({ length: colCount }, (_, c) =>
+  const naturalWidths = Array.from({ length: colCount }, (_, c) =>
     Math.max(1, visibleLength(formattedHeaders[c]), ...formattedRows.map((r) => visibleLength(r[c])))
   );
+  const widths = fitColumnWidths(naturalWidths, maxWidth);
 
   const border = (left: string, mid: string, right: string) =>
     chalk.dim(left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right);
 
-  const renderRow = (cells: string[]) =>
-    chalk.dim("│") +
-    cells.map((cell, c) => ` ${padVisibleEnd(cell, widths[c])} `).join(chalk.dim("│")) +
-    chalk.dim("│");
+  const renderMultiLineRow = (cells: string[]): string[] => {
+    const wrappedCells = cells.map((cell, c) => wrapTableCell(cell, widths[c]));
+    const rowHeight = Math.max(1, ...wrappedCells.map((lines) => lines.length));
+    const physicalLines: string[] = [];
+    for (let lineIdx = 0; lineIdx < rowHeight; lineIdx++) {
+      const lineStr =
+        chalk.dim("│") +
+        wrappedCells
+          .map((cellLines, c) => ` ${padVisibleEnd(cellLines[lineIdx] ?? "", widths[c])} `)
+          .join(chalk.dim("│")) +
+        chalk.dim("│");
+      physicalLines.push(lineStr);
+    }
+    return physicalLines;
+  };
 
   return [
     border("┌", "┬", "┐"),
-    renderRow(formattedHeaders),
+    ...renderMultiLineRow(formattedHeaders),
     border("├", "┼", "┤"),
-    ...formattedRows.map(renderRow),
+    ...formattedRows.flatMap(renderMultiLineRow),
     border("└", "┴", "┘"),
   ];
 }
 
+export const CODE_CONTINUATION_MARKER = "\x1b[39;49m";
+
 function renderCodeBlockLines(lang: string, codeLines: string[], maxWidth: number): string[] {
   const innerMax = Math.max(20, maxWidth - 4);
-  const wrappedLines: string[] = [];
+  const wrappedLines: Array<{ text: string; cont: boolean }> = [];
   for (const rawLine of codeLines) {
     if (visibleLength(rawLine) <= innerMax) {
-      wrappedLines.push(rawLine);
+      wrappedLines.push({ text: rawLine, cont: false });
     } else {
-      wrappedLines.push(...splitLongToken(rawLine, innerMax));
+      const parts = splitLongToken(rawLine, innerMax);
+      parts.forEach((p, idx) => wrappedLines.push({ text: p, cont: idx > 0 }));
     }
   }
-  if (wrappedLines.length === 0) wrappedLines.push("");
+  if (wrappedLines.length === 0) wrappedLines.push({ text: "", cont: false });
 
   const label = lang ? ` ${lang} ` : "";
+  const copyHint = " copier ";
   const contentWidth = Math.min(
     innerMax,
-    Math.max(visibleLength(label) + 2, ...wrappedLines.map((l) => visibleLength(l)), 16)
+    Math.max(visibleLength(label) + visibleLength(copyHint) + 4, ...wrappedLines.map((l) => visibleLength(l.text)), 16)
   );
-  const topDashes = Math.max(0, contentWidth + 2 - visibleLength(label) - 1);
-  const top = chalk.dim(`╭─${label}${"─".repeat(topDashes)}╮`);
+  const availDashes = contentWidth + 2 - visibleLength(label) - 1;
+  const showHint = availDashes >= visibleLength(copyHint) + 2;
+  const topDashes = showHint ? availDashes - visibleLength(copyHint) - 1 : Math.max(0, availDashes);
+  const top = showHint
+    ? chalk.dim(`╭─${label}${"─".repeat(topDashes)}${copyHint}─╮`)
+    : chalk.dim(`╭─${label}${"─".repeat(topDashes)}╮`);
   const bottom = chalk.dim(`╰${"─".repeat(contentWidth + 2)}╯`);
   const body = wrappedLines.map(
-    (l) => `${chalk.dim("│")} ${chalk.cyan(padVisibleEnd(l, contentWidth))} ${chalk.dim("│")}`
+    (l) =>
+      `${l.cont ? CODE_CONTINUATION_MARKER : ""}${chalk.dim("│")} ${chalk.cyan(
+        padVisibleEnd(l.text, contentWidth)
+      )} ${chalk.dim("│")}`
   );
   return [top, ...body, bottom];
 }
@@ -415,7 +529,7 @@ export function renderMarkdownToLines(markdown: string, maxWidth: number, indent
       continue;
     }
     if (block.type === "table") {
-      for (const l of renderTableLines(block.headers, block.rows)) {
+      for (const l of renderTableLines(block.headers, block.rows, effectiveWidth)) {
         out.push(indent + l);
       }
       continue;

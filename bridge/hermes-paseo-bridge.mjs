@@ -233,7 +233,11 @@ async function main() {
       projection: "projected",
       timeout: 4000,
     });
-    return (timeline?.entries ?? []).slice(-TIMELINE_LIMIT).map((entry) => entry.item);
+    return (timeline?.entries ?? []).slice(-TIMELINE_LIMIT).map((entry) =>
+      entry?.timestamp && entry?.item && typeof entry.item === "object"
+        ? { ...entry.item, timestamp: entry.timestamp }
+        : entry.item
+    );
   }
 
   async function loadCommands(agentId, status) {

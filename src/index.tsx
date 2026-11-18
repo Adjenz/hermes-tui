@@ -4,6 +4,7 @@ import { render } from "ink";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,7 @@ import type {
 } from "./types.js";
 import {
   chalk,
+  CODE_CONTINUATION_MARKER,
   renderMarkdownToLines,
   stripAnsi,
   useTerminalSize,
@@ -186,6 +188,202 @@ interface Selection {
   c2: number;
 }
 
+interface PersistedState {
+  lastActiveAgentId?: string | null;
+  promptHistory?: string[];
+  showDetails?: boolean;
+}
+
+const STATE_CACHE_DIR = path.join(
+  process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"),
+  "hermes-tui"
+);
+const STATE_CACHE_FILE = path.join(STATE_CACHE_DIR, "state.json");
+let currentPersistedState: PersistedState = {};
+
+function loadPersistedState(): PersistedState {
+  try {
+    if (fs.existsSync(STATE_CACHE_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(STATE_CACHE_FILE, "utf8"));
+      if (raw && typeof raw === "object") {
+        currentPersistedState = {
+          lastActiveAgentId: typeof raw.lastActiveAgentId === "string" ? raw.lastActiveAgentId : null,
+          promptHistory: Array.isArray(raw.promptHistory)
+            ? raw.promptHistory.filter((x: unknown): x is string => typeof x === "string").slice(0, 50)
+            : [],
+          showDetails: typeof raw.showDetails === "boolean" ? raw.showDetails : false,
+        };
+      }
+    }
+  } catch {
+    // ignore unreadable or corrupted cache file
+  }
+  return currentPersistedState;
+}
+
+function savePersistedState(patch: Partial<PersistedState>): void {
+  currentPersistedState = { ...currentPersistedState, ...patch };
+  try {
+    fs.mkdirSync(STATE_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(STATE_CACHE_FILE, JSON.stringify(currentPersistedState, null, 2), "utf8");
+  } catch {
+    // ignore write failures
+  }
+}
+
+function formatTimeHHMM(iso?: string): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+const PASTED_TOKEN_RE = /\[Pasted #\d+[^\]]*\]/g;
+function findPastedTokenRanges(text: string): Array<{ start: number; end: number; token: string }> {
+  const out: Array<{ start: number; end: number; token: string }> = [];
+  PASTED_TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PASTED_TOKEN_RE.exec(text)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, token: m[0] });
+  }
+  return out;
+}
+
+function isCodeTopBorder(plain: string): boolean {
+  return /^\s*╭─.*╮\s*$/.test(plain);
+}
+
+function isCodeBottomBorder(plain: string): boolean {
+  return /^\s*╰─+╯\s*$/.test(plain);
+}
+
+function extractCodeBodyContent(plain: string): string | null {
+  const m = plain.match(/^\s*│ (.*) │\s*$/);
+  return m ? m[1] : null;
+}
+
+function extractClickableCodeAt(
+  lines: string[],
+  convIdx: number,
+  clickCol: number
+): { text: string; kind: "block" | "line" | "inline" } | null {
+  if (convIdx < 0 || convIdx >= lines.length) return null;
+  const rawLine = lines[convIdx] ?? "";
+  const plainLine = stripAnsi(rawLine);
+
+  // 1. Check if the click is on or inside a fenced code block (╭─ ... ╰─)
+  if (
+    isCodeTopBorder(plainLine) ||
+    isCodeBottomBorder(plainLine) ||
+    extractCodeBodyContent(plainLine) !== null
+  ) {
+    let topIdx = -1;
+    for (let i = convIdx; i >= 0; i--) {
+      const p = stripAnsi(lines[i] ?? "");
+      if (isCodeTopBorder(p)) {
+        topIdx = i;
+        break;
+      }
+      if (i < convIdx && (isCodeBottomBorder(p) || extractCodeBodyContent(p) === null)) {
+        break;
+      }
+    }
+    let botIdx = -1;
+    if (topIdx >= 0) {
+      for (let i = Math.max(convIdx, topIdx + 1); i < lines.length; i++) {
+        const p = stripAnsi(lines[i] ?? "");
+        if (isCodeBottomBorder(p)) {
+          botIdx = i;
+          break;
+        }
+        if (extractCodeBodyContent(p) === null) {
+          break;
+        }
+      }
+    }
+
+    if (topIdx >= 0 && botIdx > topIdx + 1) {
+      const logicalLines: Array<{ text: string; startRow: number; endRow: number }> = [];
+      let curStart = topIdx + 1;
+      for (let r = topIdx + 1; r < botIdx; r++) {
+        const isLastOrNextIsNew =
+          r + 1 >= botIdx || !(lines[r + 1] ?? "").includes(CODE_CONTINUATION_MARKER);
+        if (isLastOrNextIsNew) {
+          let acc = "";
+          for (let k = curStart; k <= r; k++) {
+            const body = extractCodeBodyContent(stripAnsi(lines[k] ?? "")) ?? "";
+            acc += k < r ? body : body.trimEnd();
+          }
+          logicalLines.push({ text: acc, startRow: curStart, endRow: r });
+          curStart = r + 1;
+        }
+      }
+
+      const fullBlock = logicalLines.map((l) => l.text).join("\n").trimEnd();
+      if (!fullBlock) return null;
+
+      if (convIdx === topIdx || convIdx === botIdx || logicalLines.length === 1) {
+        return { text: fullBlock, kind: logicalLines.length > 1 ? "block" : "line" };
+      }
+
+      const clickedLogical = logicalLines.find(
+        (l) => convIdx >= l.startRow && convIdx <= l.endRow
+      );
+      if (clickedLogical && clickedLogical.text.trim()) {
+        return { text: clickedLogical.text.trim(), kind: "line" };
+      }
+      return { text: fullBlock, kind: "block" };
+    }
+  }
+
+  // 2. Check for inline code spans (\x1b[36m...\x1b[39m) on normal text lines
+  if (!/^\s*(?:●|>)\s/.test(plainLine)) {
+    const spans: Array<{ text: string; startCol: number; endCol: number }> = [];
+    let col = 1;
+    let inCyan = false;
+    let curText = "";
+    let curStart = 1;
+    let i = 0;
+    while (i < rawLine.length) {
+      if (rawLine[i] === "\x1b") {
+        const m = rawLine.slice(i).match(/^\x1b\[[0-9;]*m/);
+        if (m) {
+          const seq = m[0];
+          if (seq === "\x1b[36m") {
+            inCyan = true;
+            curText = "";
+            curStart = col;
+          } else if (inCyan && (seq === "\x1b[39m" || seq === "\x1b[0m" || seq === "\x1b[m")) {
+            inCyan = false;
+            if (curText.trim()) {
+              spans.push({ text: curText.trim(), startCol: curStart, endCol: Math.max(curStart, col - 1) });
+            }
+          }
+          i += seq.length;
+          continue;
+        }
+      }
+      const cp = rawLine.codePointAt(i)!;
+      const ch = String.fromCodePoint(cp);
+      const w = stringWidth(ch) || 0;
+      if (inCyan) curText += ch;
+      col += w;
+      i += ch.length;
+    }
+
+    if (spans.length > 0) {
+      const targetCol = Math.max(1, clickCol - 1);
+      const hit = spans.find((s) => targetCol >= s.startCol - 2 && targetCol <= s.endCol + 2);
+      if (hit) return { text: hit.text, kind: "inline" };
+      if (spans.length === 1) return { text: spans[0].text, kind: "inline" };
+    }
+  }
+
+  return null;
+}
+
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const COLOR_WORKING = "#f97316"; // Orange pour "working"
@@ -194,6 +392,7 @@ const COLOR_DONE = "#22c55e"; // Vert pour "terminé"
 const LOCAL_COMMANDS: SlashCommand[] = [
   { name: "new", description: "Créer une nouvelle session Hermes", argumentHint: "[titre]", isLocal: true },
   { name: "title", description: "Renommer l'onglet de session dans Paseo", argumentHint: "<titre>", isLocal: true },
+  { name: "copy", description: "Copier la dernière réponse (ou '/copy code' pour le dernier bloc)", argumentHint: "[code]", isLocal: true },
   { name: "reset", description: "Recréer la session à neuf (même nom) et archiver l'ancienne", isLocal: true },
   { name: "sessions", description: "Menu des onglets de session avec badges", argumentHint: "[filtre]", isLocal: true },
   { name: "agent", description: "Basculer vers un autre agent / session Hermes", argumentHint: "[filtre]", isLocal: true },
@@ -415,6 +614,7 @@ function extractToolStep(item: TimelineItem): WorkStep | null {
     command,
     output,
     status: item.status ?? "completed",
+    timestamp: item.timestamp,
   };
 }
 
@@ -478,6 +678,7 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
   const entries: StaticEntry[] = [];
   let idx = 0;
   let assistantAcc = "";
+  let assistantTs: string | undefined;
   let workSteps: WorkStep[] = [];
 
   const flushWorkGroup = () => {
@@ -487,6 +688,7 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
         kind: "work_group",
         steps: workSteps,
         text: "",
+        timestamp: workSteps[0]?.timestamp,
       });
       workSteps = [];
     }
@@ -501,10 +703,12 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
           key: `${epoch}-a-${idx++}`,
           kind: "assistant",
           text: filtered.text,
+          timestamp: assistantTs,
         });
       }
     }
     assistantAcc = "";
+    assistantTs = undefined;
   };
 
   for (const item of items) {
@@ -513,6 +717,7 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
     }
     if (item.type === "assistant_message") {
       assistantAcc += item.text ?? "";
+      if (item.timestamp) assistantTs = item.timestamp;
     } else if (item.type === "tool_call") {
       flushAssistant();
       const step = extractToolStep(item);
@@ -527,18 +732,21 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
           key: `${epoch}-u-${idx++}`,
           kind: "user",
           text: item.text.trim(),
+          timestamp: item.timestamp,
         });
       } else if (item.type === "error" && item.message) {
         entries.push({
           key: `${epoch}-e-${idx++}`,
           kind: "error",
           text: item.message,
+          timestamp: item.timestamp,
         });
       } else if (item.type === "notification" && item.message) {
         entries.push({
           key: `${epoch}-n-${idx++}`,
           kind: "notice",
           text: item.message,
+          timestamp: item.timestamp,
         });
       }
     }
@@ -546,6 +754,15 @@ function timelineToStaticEntries(items: TimelineItem[], epoch: number): StaticEn
   flushAssistant();
   flushWorkGroup();
   return entries;
+}
+
+function renderSeparatorRule(ruleLen: number, timestamp?: string): string {
+  const ts = formatTimeHHMM(timestamp);
+  if (ts) {
+    const dashes = Math.max(4, ruleLen - ts.length - 1);
+    return chalk.dim(`${"─".repeat(dashes)} ${ts}`);
+  }
+  return chalk.dim("─".repeat(ruleLen));
 }
 
 function buildConversationLines(
@@ -560,6 +777,8 @@ function buildConversationLines(
 ): string[] {
   const lines: string[] = [];
   const ruleLen = Math.max(20, Math.min(contentWidth, 64));
+  let lastTurnKind: StaticEntry["kind"] | null = null;
+  let lastShownHHMM: string | null = null;
 
   for (const entry of entries) {
     if (entry.kind === "banner") {
@@ -569,23 +788,48 @@ function buildConversationLines(
       if (lines.length > 0 && lines[lines.length - 1] !== "") {
         lines.push("");
       }
-      lines.push(chalk.dim("─".repeat(ruleLen)));
+      lines.push(renderSeparatorRule(ruleLen, entry.timestamp));
+      const hhmm = formatTimeHHMM(entry.timestamp);
+      if (hhmm) lastShownHHMM = hhmm;
       const promptWrapped = wrapAnsiText(chalk.blue(entry.text), contentWidth, chalk.blue("> "), "  ");
       lines.push(...promptWrapped.split("\n"));
       lines.push("");
+      lastTurnKind = "user";
       continue;
     }
     if (entry.kind === "work_group" && entry.steps) {
+      const hhmm = formatTimeHHMM(entry.timestamp);
+      if ((lastTurnKind === null || (lastTurnKind === "assistant" && hhmm && hhmm !== lastShownHHMM)) && entry.timestamp) {
+        if (lines.length > 0 && lines[lines.length - 1] !== "") {
+          lines.push("");
+        }
+        lines.push(renderSeparatorRule(ruleLen, entry.timestamp));
+        lines.push("");
+        if (hhmm) lastShownHHMM = hhmm;
+      }
       lines.push(...formatWorkGroupLines(entry.steps, showDetails, contentWidth));
       lines.push("");
+      lastTurnKind = "work_group";
       continue;
     }
     if (entry.kind === "assistant") {
+      const hhmm = formatTimeHHMM(entry.timestamp);
+      if ((lastTurnKind === null || lastTurnKind === "assistant") && entry.timestamp) {
+        if (lines.length > 0 && lines[lines.length - 1] !== "") {
+          lines.push("");
+        }
+        lines.push(renderSeparatorRule(ruleLen, entry.timestamp));
+        lines.push("");
+        if (hhmm) lastShownHHMM = hhmm;
+      } else if (hhmm) {
+        lastShownHHMM = hhmm;
+      }
       const mdLines = renderMarkdownToLines(entry.text, contentWidth, "  ");
       lines.push(...mdLines);
       if (lines.length > 0 && lines[lines.length - 1] !== "") {
         lines.push("");
       }
+      lastTurnKind = "assistant";
       continue;
     }
     if (entry.kind === "error") {
@@ -773,7 +1017,9 @@ Usage:
 
 Raccourcis clavier & souris:
   Clic sur onglet (en haut)  Basculer directement sur une session
-  Molette / PgUp / PgDn      Défiler dans la discussion
+  Clic sur code / bloc       Copier la ligne de code ou le bloc entier (en-tête "copier")
+  Molette / PgUp / PgDn      Défiler dans la discussion (verrouille la position pendant le stream)
+  Ctrl+Y / /copy             Copier le dernier bloc de code ou la dernière réponse
   Ctrl+V                     Joindre image/PDF/fichier du presse-papiers (ou coller du texte)
   /archive                   Archiver la session courante
   Ctrl+F                     Rechercher dans la conversation active
@@ -891,6 +1137,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const { columns: termCols, rows: termRows } = useTerminalSize();
+  const initialPersisted = useMemo(() => loadPersistedState(), []);
+  const persistedAgentIdRef = useRef<string | null>(initialPersisted.lastActiveAgentId ?? null);
 
   const bridgeRef = useRef<ChildProcessWithoutNullStreams | null>(null);
   const seqRef = useRef(0);
@@ -905,6 +1153,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
   const [sessionEpoch, setSessionEpoch] = useState(1);
   const [staticItems, setStaticItems] = useState<StaticEntry[]>([]);
+  const staticItemsRef = useRef<StaticEntry[]>([]);
+  staticItemsRef.current = staticItems;
 
   const [liveAssistant, setLiveAssistant] = useState("");
   const [liveTools, setLiveTools] = useState<LiveTool[]>([]);
@@ -920,9 +1170,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const intentionalCloseRef = useRef(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelayRef = useRef(1500);
-  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  const [promptHistory, setPromptHistory] = useState<string[]>(() => initialPersisted.promptHistory ?? []);
   const [historyIdx, setHistoryIdx] = useState<number>(-1);
   const [scrollOffset, setScrollOffset] = useState(0);
+  const scrollAnchorRef = useRef<number | null>(null);
+  const pendingOptimisticUsersRef = useRef<string[]>([]);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   attachmentsRef.current = attachments;
@@ -941,7 +1193,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
+  const [showDetails, setShowDetails] = useState<boolean>(() => initialPersisted.showDetails ?? false);
   const [completedAgentIds, setCompletedAgentIds] = useState<Set<string>>(() => new Set());
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
   const timelineCacheRef = useRef<Map<string, CachedSession>>(new Map());
@@ -975,12 +1227,26 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
   function pushStatic(entry: Omit<StaticEntry, "key">): void {
     seqRef.current += 1;
-    setStaticItems((prev) => [...prev, { ...entry, key: `live-${seqRef.current}` }]);
+    const item: StaticEntry = {
+      ...entry,
+      key: `live-${seqRef.current}`,
+      timestamp: entry.timestamp ?? new Date().toISOString(),
+    };
+    setStaticItems((prev) => {
+      const next = [...prev, item];
+      const curId = activeAgentIdRef.current;
+      if (curId) {
+        const cached = timelineCacheRef.current.get(curId);
+        if (cached) cached.entries = next;
+      }
+      return next;
+    });
   }
 
   function flushLiveTurnToStatic(): void {
     const t = liveToolsRef.current;
     const a = liveAssistantRef.current.replace(/^\n+/, "");
+    const nowIso = new Date().toISOString();
 
     const workSteps: WorkStep[] = t.map((tool) => ({
       kind: "tool",
@@ -989,6 +1255,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       command: tool.command,
       output: tool.output,
       status: tool.status,
+      timestamp: nowIso,
     }));
 
     const additions: StaticEntry[] = [];
@@ -999,6 +1266,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         kind: "work_group",
         steps: workSteps,
         text: "",
+        timestamp: nowIso,
       });
     }
     if (a.trim()) {
@@ -1009,11 +1277,20 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           key: `live-${seqRef.current}`,
           kind: "assistant",
           text: filtered.text,
+          timestamp: nowIso,
         });
       }
     }
     if (additions.length > 0) {
-      setStaticItems((prev) => [...prev, ...additions]);
+      setStaticItems((prev) => {
+        const next = [...prev, ...additions];
+        const curId = activeAgentIdRef.current;
+        if (curId) {
+          const cached = timelineCacheRef.current.get(curId);
+          if (cached) cached.entries = next;
+        }
+        return next;
+      });
     }
     liveToolsRef.current = [];
     liveAssistantRef.current = "";
@@ -1029,6 +1306,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setLiveTools([]);
     setIsStreaming(agent?.status === "running");
     setIsThinking(false);
+    scrollAnchorRef.current = null;
+    pendingOptimisticUsersRef.current = [];
     setScrollOffset(0);
 
     const entries = timelineToStaticEntries(timeline, nextEpoch);
@@ -1107,6 +1386,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             (activeAgentIdRef.current && list.some((a) => a.id === activeAgentIdRef.current)
               ? activeAgentIdRef.current
               : null) ??
+            (!initialQuery &&
+            persistedAgentIdRef.current &&
+            list.some((a) => a.id === persistedAgentIdRef.current)
+              ? persistedAgentIdRef.current
+              : null) ??
             msg.activeAgentId ??
             list[0]?.id ??
             null;
@@ -1123,6 +1407,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
           setActiveAgentId(chosenId);
           activeAgentIdRef.current = chosenId;
+          if (chosenId) savePersistedState({ lastActiveAgentId: chosenId });
           setConnecting(false);
 
           if (chosenId && chosenId !== msg.activeAgentId) {
@@ -1213,6 +1498,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           pendingSwitchIdRef.current = null;
           setActiveAgentId(nextId);
           activeAgentIdRef.current = nextId;
+          savePersistedState({ lastActiveAgentId: nextId });
           const active = agentsRef.current.find((a) => a.id === nextId);
           const tl: TimelineItem[] = msg.timeline ?? [];
           const cmds: SlashCommand[] = msg.commands ?? [];
@@ -1267,8 +1553,17 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const item: TimelineItem = ev.item;
             if (item.type === "user_message" && item.text) {
               flushLiveTurnToStatic();
-              pushStatic({ kind: "user", text: item.text.trim() });
-              setScrollOffset(0);
+              const incoming = item.text.trim();
+              const optIdx = pendingOptimisticUsersRef.current.findIndex(
+                (opt) => incoming === opt || incoming.startsWith(`${opt}\n\n[Fichiers joints`)
+              );
+              if (optIdx >= 0) {
+                pendingOptimisticUsersRef.current.splice(optIdx, 1);
+              } else {
+                pushStatic({ kind: "user", text: incoming, timestamp: item.timestamp });
+                scrollAnchorRef.current = null;
+                setScrollOffset(0);
+              }
             } else if (item.type === "reasoning") {
               setIsStreaming(true);
               setIsThinking(true);
@@ -1484,6 +1779,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     pendingSwitchIdRef.current = id;
     activeAgentIdRef.current = id;
     setActiveAgentId(id);
+    savePersistedState({ lastActiveAgentId: id });
     setCompletedAgentIds((prev) => {
       if (!prev.has(id) && !(prevId && prev.has(prevId))) return prev;
       const next = new Set(prev);
@@ -1505,9 +1801,86 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setLiveTools([]);
     setIsStreaming(target?.status === "running");
     setIsThinking(false);
+    scrollAnchorRef.current = null;
+    pendingOptimisticUsersRef.current = [];
     setScrollOffset(0);
     setModal("none");
     sendBridge({ cmd: "switch_agent", agentId: id });
+  }
+
+  function showTransientCopyNotice(notice: string): void {
+    setStatusNotice(notice);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => {
+      setStatusNotice((n) => (n === notice ? null : n));
+    }, 2000);
+  }
+
+  function copyLatestFromConversation(mode: "auto" | "all" | "code"): void {
+    const assistantTexts: string[] = [];
+    for (const it of staticItemsRef.current) {
+      if (it.kind === "assistant" && it.text.trim()) {
+        assistantTexts.push(it.text.trim());
+      }
+    }
+    if (liveAssistantRef.current.trim()) {
+      const filtered = filterNoReply(liveAssistantRef.current.replace(/^\n+/, ""));
+      if (!filtered.isSilentOnly && filtered.text.trim()) {
+        assistantTexts.push(filtered.text.trim());
+      }
+    }
+    if (assistantTexts.length === 0) {
+      showTransientCopyNotice("Aucune réponse à copier.");
+      return;
+    }
+
+    const extractCodeBlocks = (md: string): string[] => {
+      const blocks: string[] = [];
+      const re = /```[^\n]*\n([\s\S]*?)```/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(md)) !== null) {
+        if (m[1]?.trim()) blocks.push(m[1].replace(/\s+$/, ""));
+      }
+      return blocks;
+    };
+
+    const latestReply = assistantTexts[assistantTexts.length - 1];
+    if (mode === "all") {
+      copyToClipboard(latestReply);
+      showTransientCopyNotice("✓ Dernière réponse copiée");
+      return;
+    }
+
+    const latestBlocks = extractCodeBlocks(latestReply);
+    if (latestBlocks.length > 0) {
+      const picked = latestBlocks[latestBlocks.length - 1];
+      copyToClipboard(picked);
+      const lineCount = picked.split("\n").length;
+      const oneLine = picked.replace(/\s+/g, " ").trim();
+      showTransientCopyNotice(
+        lineCount > 1
+          ? `✓ Dernier bloc de code copié (${lineCount} lignes)`
+          : `✓ Code copié : ${oneLine.length > 40 ? `${oneLine.slice(0, 39)}…` : oneLine}`
+      );
+      return;
+    }
+
+    if (mode === "code") {
+      for (let i = assistantTexts.length - 2; i >= 0; i--) {
+        const blocks = extractCodeBlocks(assistantTexts[i]);
+        if (blocks.length > 0) {
+          const picked = blocks[blocks.length - 1];
+          copyToClipboard(picked);
+          showTransientCopyNotice(`✓ Dernier bloc de code copié (${picked.split("\n").length} lignes)`);
+          return;
+        }
+      }
+      showTransientCopyNotice("Aucun bloc de code trouvé.");
+      return;
+    }
+
+    copyToClipboard(latestReply);
+    showTransientCopyNotice("✓ Dernière réponse copiée");
   }
 
   function setPrompt(text: string, pos: number = text.length): void {
@@ -1555,7 +1928,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     if (!trimmed) trimmed = pendingFiles.length > 1 ? "Voici les fichiers joints." : "Voici le fichier joint.";
 
     pastedTextsRef.current.clear();
-    setPromptHistory((prev) => [trimmed, ...prev.slice(0, 49)]);
+    setPromptHistory((prev) => {
+      const next = [trimmed, ...prev.filter((p) => p !== trimmed).slice(0, 49)];
+      savePersistedState({ promptHistory: next });
+      return next;
+    });
     setHistoryIdx(-1);
     setPrompt("", 0);
 
@@ -1571,6 +1948,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         bridgeRef.current?.kill("SIGTERM");
         cleanupTerminalScreen();
         exit();
+        return;
+      }
+      if (cmdName === "copy" || cmdName === "cp") {
+        const sub = arg.toLowerCase();
+        copyLatestFromConversation(sub === "code" ? "code" : "all");
         return;
       }
       if (cmdName === "new") {
@@ -1609,6 +1991,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       }
       if (cmdName === "clear") {
         setStaticItems([]);
+        scrollAnchorRef.current = null;
         setScrollOffset(0);
         setSessionEpoch((e) => e + 1);
         return;
@@ -1680,6 +2063,16 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       pushStatic({ kind: "error", text: "Aucun agent actif sélectionné." });
       return;
     }
+    if (liveAssistantRef.current.trim().length > 0 || liveToolsRef.current.length > 0) {
+      flushLiveTurnToStatic();
+    }
+    const optimisticDisplay =
+      pendingFiles.length > 0
+        ? `${trimmed}\n📎 ${pendingFiles.map((f) => `${f.name} (${formatSize(f.size)})`).join(" · ")}`
+        : trimmed;
+    pendingOptimisticUsersRef.current.push(trimmed);
+    pushStatic({ kind: "user", text: optimisticDisplay, timestamp: new Date().toISOString() });
+    scrollAnchorRef.current = null;
     setScrollOffset(0);
     setIsStreaming(true);
     setCompletedAgentIds((prev) => {
@@ -1753,7 +2146,14 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     rootHeight - topBarHeight - promptHeight - statusBarHeight - searchHeight - slashHeight - modalHeight
   );
   const maxScroll = Math.max(0, conversationLines.length - viewportHeight);
-  const effectiveScroll = Math.min(scrollOffset, maxScroll);
+  let effectiveScroll = Math.min(scrollOffset, maxScroll);
+  if (scrollOffset > 0 && scrollAnchorRef.current !== null) {
+    const anchoredEnd = Math.max(
+      Math.min(viewportHeight, conversationLines.length),
+      Math.min(conversationLines.length, scrollAnchorRef.current)
+    );
+    effectiveScroll = Math.max(0, Math.min(maxScroll, conversationLines.length - anchoredEnd));
+  }
   const sliceEnd = Math.max(0, conversationLines.length - effectiveScroll);
   const sliceStart = Math.max(0, sliceEnd - viewportHeight);
   const visibleConversation = conversationLines.slice(sliceStart, sliceEnd);
@@ -1762,6 +2162,25 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     visibleConversation.length < viewportHeight
       ? [...Array(viewportHeight - visibleConversation.length).fill(""), ...visibleConversation]
       : visibleConversation;
+
+  function updateScrollOffset(nextOrUpdater: number | ((prev: number) => number)): void {
+    setScrollOffset((prev) => {
+      const base =
+        prev > 0 && scrollAnchorRef.current !== null
+          ? Math.max(0, Math.min(maxScroll, conversationLines.length - scrollAnchorRef.current))
+          : prev;
+      const rawNext = typeof nextOrUpdater === "function" ? nextOrUpdater(base) : nextOrUpdater;
+      const clamped = Math.max(0, Math.min(maxScroll, rawNext));
+      scrollAnchorRef.current = clamped > 0 ? conversationLines.length - clamped : null;
+      return clamped;
+    });
+  }
+
+  useEffect(() => {
+    if (scrollOffset > 0 && effectiveScroll !== scrollOffset) {
+      setScrollOffset(effectiveScroll);
+    }
+  }, [effectiveScroll, scrollOffset]);
 
   const searchMatches = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1778,7 +2197,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   function jumpToSearchLine(lineIdx: number): void {
     const desiredEnd = Math.min(conversationLines.length, lineIdx + Math.ceil(viewportHeight / 2));
     const nextScroll = Math.max(0, Math.min(maxScroll, conversationLines.length - desiredEnd));
-    setScrollOffset(nextScroll);
+    updateScrollOffset(nextScroll);
   }
 
   const displayedConversation = useMemo(() => {
@@ -1802,7 +2221,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       });
     }
 
-    if (!selection || (selection.r1 === selection.r2 && selection.c1 === selection.c2)) {
+    if (!selection || (selection.r1 === selection.r2 && Math.abs(selection.c1 - selection.c2) <= 1)) {
       return base;
     }
     const forward = selection.r1 < selection.r2 || (selection.r1 === selection.r2 && selection.c1 <= selection.c2);
@@ -1934,7 +2353,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           }
         } else if (btn === 0 && kind === "m") {
           const sel = selectionRef.current;
-          if (sel && (sel.r1 !== sel.r2 || sel.c1 !== sel.c2)) {
+          const isSingleClick = Boolean(sel && sel.r1 === sel.r2 && Math.abs(sel.c1 - sel.c2) <= 1);
+          if (sel && !isSingleClick) {
             const forward = sel.r1 < sel.r2 || (sel.r1 === sel.r2 && sel.c1 <= sel.c2);
             const startRow = forward ? sel.r1 : sel.r2;
             const startCol = forward ? sel.c1 : sel.c2;
@@ -1952,22 +2372,34 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const copied = extractedLines.join("\n").trim();
             if (copied) {
               copyToClipboard(copied);
-              setStatusNotice("✓ Copié dans le presse-papiers");
-              if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-              copyTimerRef.current = setTimeout(() => {
-                setStatusNotice((n) => (n === "✓ Copié dans le presse-papiers" ? null : n));
-              }, 1800);
+              showTransientCopyNotice("✓ Copié dans le presse-papiers");
             }
             setTimeout(() => setSelection(null), 160);
+          } else if (sel && isSingleClick) {
+            setSelection(null);
+            const lineIdx = sel.r1 - viewportStartRow;
+            const padOffset = Math.max(0, viewportHeight - visibleConversation.length);
+            const convIdx = lineIdx >= padOffset ? sliceStart + (lineIdx - padOffset) : -1;
+            const codeHit = extractClickableCodeAt(conversationLines, convIdx, sel.c1);
+            if (codeHit && codeHit.text) {
+              copyToClipboard(codeHit.text);
+              if (codeHit.kind === "block") {
+                showTransientCopyNotice(`✓ Bloc de code copié (${codeHit.text.split("\n").length} lignes)`);
+              } else {
+                const oneLine = codeHit.text.replace(/\s+/g, " ").trim();
+                const preview = oneLine.length > 42 ? `${oneLine.slice(0, 41)}…` : oneLine;
+                showTransientCopyNotice(`✓ Code copié : ${preview}`);
+              }
+            }
           } else {
             setSelection(null);
           }
         } else if (btn === 64) {
           setSelection(null);
-          setScrollOffset((s) => Math.min(maxScroll, s + 3));
+          updateScrollOffset((s) => s + 3);
         } else if (btn === 65) {
           setSelection(null);
-          setScrollOffset((s) => Math.max(0, s - 3));
+          updateScrollOffset((s) => s - 3);
         }
       }
       if (matched || char.startsWith("[<") || char.startsWith("[M")) {
@@ -2046,12 +2478,21 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       }
     }
 
+    if (key.ctrl && char === "y") {
+      copyLatestFromConversation("auto");
+      return;
+    }
+
     if (key.ctrl && (char === "a" || char === "s")) {
       openModal(modal === "agents" ? "none" : "agents");
       return;
     }
     if (key.ctrl && char === "o") {
-      setShowDetails((v) => !v);
+      setShowDetails((v) => {
+        const next = !v;
+        savePersistedState({ showDetails: next });
+        return next;
+      });
       return;
     }
     if (key.ctrl && char === "l") {
@@ -2076,11 +2517,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     }
 
     if (key.pageUp) {
-      setScrollOffset((s) => Math.min(maxScroll, s + Math.max(4, Math.floor(viewportHeight / 2))));
+      updateScrollOffset((s) => s + Math.max(4, Math.floor(viewportHeight / 2)));
       return;
     }
     if (key.pageDown) {
-      setScrollOffset((s) => Math.max(0, s - Math.max(4, Math.floor(viewportHeight / 2))));
+      updateScrollOffset((s) => s - Math.max(4, Math.floor(viewportHeight / 2)));
       return;
     }
 
@@ -2213,11 +2654,19 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
 
     // Prompt cursor navigation & editing shortcuts
     if (key.leftArrow) {
-      setPrompt(inputRef.current, cursorRef.current - 1);
+      const curText = inputRef.current;
+      let target = Math.max(0, cursorRef.current - 1);
+      const hit = findPastedTokenRanges(curText).find((r) => target > r.start && target < r.end);
+      if (hit) target = hit.start;
+      setPrompt(curText, target);
       return;
     }
     if (key.rightArrow) {
-      setPrompt(inputRef.current, cursorRef.current + 1);
+      const curText = inputRef.current;
+      let target = Math.min(curText.length, cursorRef.current + 1);
+      const hit = findPastedTokenRanges(curText).find((r) => target > r.start && target < r.end);
+      if (hit) target = hit.end;
+      setPrompt(curText, target);
       return;
     }
     if (char === "[H" || char === "[1~" || char === "OH") {
@@ -2248,6 +2697,17 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       const pos = cursorRef.current;
       const before = curText.slice(0, pos);
       const trimmedRight = before.replace(/\s+$/, "");
+      const tokenHit = findPastedTokenRanges(curText).find(
+        (r) => trimmedRight.length > r.start && trimmedRight.length <= r.end
+      );
+      if (tokenHit) {
+        const nextText = curText.slice(0, tokenHit.start) + curText.slice(pos);
+        if (!nextText.includes(tokenHit.token)) {
+          pastedTextsRef.current.delete(tokenHit.token);
+        }
+        setPrompt(nextText, tokenHit.start);
+        return;
+      }
       const wordStart = trimmedRight.search(/\S+$/);
       const cutAt = wordStart >= 0 ? wordStart : 0;
       setPrompt(curText.slice(0, cutAt) + curText.slice(pos), cutAt);
@@ -2274,6 +2734,16 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         return;
       }
       if (pos > 0) {
+        const tokenHit = findPastedTokenRanges(curText).find((r) => pos > r.start && pos <= r.end);
+        if (tokenHit) {
+          const nextText = curText.slice(0, tokenHit.start) + curText.slice(tokenHit.end);
+          if (!nextText.includes(tokenHit.token)) {
+            pastedTextsRef.current.delete(tokenHit.token);
+          }
+          setPrompt(nextText, tokenHit.start);
+          setSlashIdx(0);
+          return;
+        }
         setPrompt(curText.slice(0, pos - 1) + curText.slice(pos), pos - 1);
       }
       setSlashIdx(0);
@@ -2543,7 +3013,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       {/* Single-line minimalist status bar */}
       <Box width="100%" height={1} paddingX={1} overflow="hidden" justifyContent="space-between" gap={1}>
         <Text dimColor wrap="truncate-end">
-          ^S sessions · ^O expand{showDetails ? "*" : ""} · ^V coller fichier · ^L model · /
+          ^S sessions · ^O expand{showDetails ? "*" : ""} · ^Y copier · ^V coller · ^L model · /
         </Text>
         <Text wrap="truncate-end">
           <Text color="yellow">{activeAgent?.title ?? "—"}</Text>

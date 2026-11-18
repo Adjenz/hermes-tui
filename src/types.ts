@@ -76,6 +76,7 @@ export interface TimelineItem {
   };
   items?: Array<{ text?: string; title?: string; completed?: boolean }>;
   level?: string;
+  timestamp?: string;
 }
 
 export interface WorkStep {
@@ -85,6 +86,7 @@ export interface WorkStep {
   command: string;
   output: string;
   status: string;
+  timestamp?: string;
 }
 
 export interface StaticEntry {
@@ -95,6 +97,7 @@ export interface StaticEntry {
   status?: string;
   steps?: WorkStep[];
   summary?: string;
+  timestamp?: string;
 }
 
 export interface PermissionPrompt {

@@ -18,10 +18,14 @@ A real, modern terminal UI (React + Ink) built to replace **Hermes Agent**'s def
   - `○` **dim**: waiting (*idle*)
 - **Clean collapsible tool calls (`Ctrl+O`) & live `Thinking…` indicator:** consecutive tool invocations (`Bash`, `Edit`, `Read`, `Memory`, etc.) are grouped and collapsed by default (`● Bash(…) (ctrl+o to expand)`), expand cleanly with single-`⎿` indentation and colorized `Edit` diffs (`+`/`-`), and reasoning shows a minimal live `Thinking…` indicator.
 - **Modern terminal ergonomics:**
-  - Full prompt editing (`←`/`→`, `Home`/`End`, `Ctrl+E`, `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, and multi-line input via `Shift+Enter` / `Alt+Enter`) with **per-session drafts** preserved when switching tabs.
+  - Full prompt editing (`←`/`→`, `Home`/`End`, `Ctrl+E`, `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, and multi-line input via `Shift+Enter` / `Alt+Enter`) with **per-session drafts** preserved when switching tabs and **smart `[Pasted #N +M lines]` tokens** (deleted & navigated atomically).
+  - **One-click code copy:** single-click any line of code (fenced block row or inline `` `code` ``) to copy that logical line, or click the code block header (`╭─ lang ─── copier ─╮`) to copy the entire code block.
+  - Quick copy via **`Ctrl+Y`** or **`/copy [code]`** to copy the latest code block or full assistant reply.
   - Instant **in-session search** (`Ctrl+F`) with match highlighting and auto-jump.
   - Mouse drag selection with **auto-copy on release** (`wl-copy` + `OSC 52`).
-  - Mouse wheel and `PgUp`/`PgDn` scrolling.
+  - Mouse wheel and `PgUp`/`PgDn` scrolling with **automatic scroll lock** while reading history during live streaming.
+  - Subtle **`HH:MM` turn timestamps** and **responsive Markdown tables** that wrap cells cleanly to fit the terminal width.
+  - **Local state persistence** (`~/.cache/hermes-tui/state.json`) remembering your last active session tab, prompt history (`↑`/`↓`), and `Ctrl+O` expansion state across restarts.
   - Clipboard **image, PDF, and file attachments** via `Ctrl+V` (or pasted path / `file://` URI).
   - Live **context window usage** (`used/max (%)`) in the bottom status bar.
   - Desktop notifications (`notify-send`, disable via `HERMES_TUI_NOTIFY=0`) when background agents finish or request permission.
@@ -112,8 +116,10 @@ htui --help       # Show CLI help
 | Shortcut | Action |
 |---|---|
 | Click a tab (top bar) | Switch to that session |
+| Single-click a code line / header | Copy that logical line of code (or the whole block when clicking `╭─ … copier ─╮`) |
 | Mouse drag in chat | Select text & auto-copy on release |
-| Mouse wheel / `PgUp` / `PgDn` | Scroll conversation history |
+| Mouse wheel / `PgUp` / `PgDn` | Scroll conversation history (locks position while streaming) |
+| `Ctrl+Y` / `/copy [code]` | Copy latest code block or latest assistant response |
 | `Ctrl+O` | Expand / collapse tool call details |
 | `Ctrl+F` | Search in current conversation (`Enter` / `↑↓` to jump, `Esc` to close) |
 | `Ctrl+V` | Attach clipboard image / PDF / file (or paste text) |
