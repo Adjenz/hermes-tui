@@ -1,6 +1,6 @@
 {
   "name": "hermes-tui",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "type": "module",
   "description": "Modern React + Ink TUI for persistent Hermes Agents with multi-role visibility and remote control via Paseo",

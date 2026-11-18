@@ -94,7 +94,7 @@ export interface WorkStep {
 
 export interface StaticEntry {
   key: string;
-  kind: "banner" | "user" | "assistant" | "work_group" | "notice" | "error";
+  kind: "banner" | "user" | "assistant" | "work_group" | "notice" | "error" | "local";
   title?: string;
   text: string;
   status?: string;

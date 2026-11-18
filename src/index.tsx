@@ -29,6 +29,7 @@ import {
   visibleLength,
   wrapAnsiText,
 } from "./markdown.js";
+import { SHORTCUTS_MARKDOWN, buildHelpMarkdown } from "./help.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_BRIDGE_PATH = path.resolve(__dirname, "../bridge/hermes-paseo-bridge.mjs");
@@ -474,6 +475,8 @@ const COLOR_WORKING = "#f97316"; // Orange pour "working"
 const COLOR_DONE = "#22c55e"; // Vert pour "terminé"
 
 const LOCAL_COMMANDS: SlashCommand[] = [
+  { name: "help", description: "Lister toutes les commandes disponibles", isLocal: true },
+  { name: "shortcuts", description: "Lister tous les raccourcis clavier et souris", isLocal: true },
   { name: "to", description: "Transférer la dernière réponse vers une autre session", argumentHint: "<session> [texte]", isLocal: true },
   { name: "new", description: "Créer une nouvelle session Hermes", argumentHint: "[titre]", isLocal: true },
   { name: "title", description: "Renommer l'onglet de session dans Paseo", argumentHint: "<titre>", isLocal: true },
@@ -918,6 +921,14 @@ function buildConversationLines(
       lastTurnKind = "assistant";
       continue;
     }
+    if (entry.kind === "local") {
+      if (lines.length > 0 && lines[lines.length - 1] !== "") {
+        lines.push("");
+      }
+      lines.push(...renderMarkdownToLines(entry.text, contentWidth, "  "));
+      lines.push("");
+      continue;
+    }
     if (entry.kind === "error") {
       const wrapped = wrapAnsiText(chalk.red(`✖ ${entry.text}`), contentWidth, "  ", "    ");
       lines.push(...wrapped.split("\n"));
@@ -1167,6 +1178,8 @@ Raccourcis clavier & souris:
   Ctrl+T / /thinking         Sélecteur du niveau de thinking
   Ctrl+N / Ctrl+P            Session suivante / précédente
   /                          Menu d'autocomplétion des commandes slash
+  /help                      Liste de toutes les commandes disponibles
+  /shortcuts                 Liste de tous les raccourcis clavier et souris
   Tab                        Compléter la commande sélectionnée
   Esc                        Annuler le tour en cours ou fermer un menu
   Ctrl+C                     Quitter`);
@@ -2418,6 +2431,18 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         bridgeRef.current?.kill("SIGTERM");
         cleanupTerminalScreen();
         exit();
+        return;
+      }
+      if (cmdName === "help" || cmdName === "?") {
+        pushStatic({ kind: "local", text: buildHelpMarkdown(allSlashCommands) });
+        scrollAnchorRef.current = null;
+        setScrollOffset(0);
+        return;
+      }
+      if (cmdName === "shortcuts" || cmdName === "keys") {
+        pushStatic({ kind: "local", text: SHORTCUTS_MARKDOWN });
+        scrollAnchorRef.current = null;
+        setScrollOffset(0);
         return;
       }
       if (cmdName === "copy" || cmdName === "cp") {

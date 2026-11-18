@@ -135,6 +135,8 @@ htui --help       # Show CLI help
 | `Ctrl+T` / `/thinking` | Change thinking level |
 | `/mode` | Change approval mode (`default`, `accept_edits`, `dont_ask`) |
 | `/to <session> [text]` | Forward the latest assistant response to another session |
+| `/help` | List every available slash command (hermes-tui + Hermes) |
+| `/shortcuts` | List every keyboard and mouse shortcut |
 | `/new [title]` | Create a new Hermes session |
 | `/title <name>` | Rename the current session tab in Paseo |
 | `/reset` | Recreate a fresh session with the same name & archive the old one |
