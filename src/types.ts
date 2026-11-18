@@ -50,6 +50,9 @@ export interface SlashCommand {
   description: string;
   argumentHint?: string;
   isLocal?: boolean;
+  displayName?: string;
+  fillValue?: string;
+  submitOnEnter?: boolean;
 }
 
 export interface TimelineItem {

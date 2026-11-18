@@ -35,7 +35,7 @@ async function loadConnectToDaemon() {
 }
 
 const PASEO_HOME = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
-const TIMELINE_LIMIT = 120;
+const TIMELINE_LIMIT = 200;
 const UPLOAD_DIR = path.join(PASEO_HOME, "uploads");
 const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
 
@@ -161,7 +161,11 @@ async function main() {
       }
       const cleaned = text
         .replace(/\r\n/g, "\n")
-        .replace(/(?:^|\n)[ \t]*💭\s*Reasoning:\s*\n[ \t]*╭[\s\S]*?╰[─━\s]*╯[ \t]*(?=\n|$)/g, "\n")
+        .replace(
+          /(?:^|\n)[ \t]*💭\s*[*_~]*Reasoning:?[*_~]*[ \t]*\n(?:[ \t]*╭[\s\S]*?╰[─━\s]*╯|[ \t]*```[\s\S]*?```)[ \t]*(?=\n|$)/g,
+          "\n"
+        )
+        .replace(/(?:^|\n)[ \t]*💭\s*[*_~]*Reasoning:?[*_~]*[\s\S]*$/, "")
         .split("\n")
         .filter((l) => !/^⚠️?\s*The model returned only a silence marker/i.test(l.trim()))
         .join("\n")
@@ -191,12 +195,20 @@ async function main() {
       wsRes && Array.isArray(wsRes.entries) && wsRes.entries.length > 0
         ? new Set(wsRes.entries.filter((w) => !w.archivingAt && !w.archivedAt).map((w) => w.id))
         : null;
+    const attentionWorkspaceIds =
+      wsRes && Array.isArray(wsRes.entries)
+        ? new Set(wsRes.entries.filter((w) => w.status === "attention").map((w) => w.id))
+        : new Set();
 
     const rawEntries = [];
     for (const entry of res.entries ?? []) {
       const a = compactAgent(entry);
       if (a.provider !== "hermes" || isArchived(a)) continue;
       if (activeWorkspaceIds && a.workspaceId && !activeWorkspaceIds.has(a.workspaceId)) continue;
+      if (a.workspaceId && attentionWorkspaceIds.has(a.workspaceId) && entry?.agent) {
+        entry.agent.requiresAttention = true;
+        a.requiresAttention = true;
+      }
       rawEntries.push({ entry, compact: a });
     }
 
@@ -308,7 +320,10 @@ async function main() {
       projection: "projected",
       timeout: 4000,
     });
-    return (timeline?.entries ?? []).slice(-TIMELINE_LIMIT).map((entry) =>
+    const visibleEntries = (timeline?.entries ?? []).filter(
+      (entry) => entry?.item && entry.item.type !== "reasoning"
+    );
+    return visibleEntries.slice(-TIMELINE_LIMIT).map((entry) =>
       entry?.timestamp && entry?.item && typeof entry.item === "object"
         ? { ...entry.item, timestamp: entry.timestamp }
         : entry.item

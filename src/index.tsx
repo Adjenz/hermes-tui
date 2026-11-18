@@ -474,6 +474,7 @@ const COLOR_WORKING = "#f97316"; // Orange pour "working"
 const COLOR_DONE = "#22c55e"; // Vert pour "terminé"
 
 const LOCAL_COMMANDS: SlashCommand[] = [
+  { name: "to", description: "Transférer la dernière réponse vers une autre session", argumentHint: "<session> [texte]", isLocal: true },
   { name: "new", description: "Créer une nouvelle session Hermes", argumentHint: "[titre]", isLocal: true },
   { name: "title", description: "Renommer l'onglet de session dans Paseo", argumentHint: "<titre>", isLocal: true },
   { name: "copy", description: "Copier la dernière réponse (ou '/copy code' pour le dernier bloc)", argumentHint: "[code]", isLocal: true },
@@ -561,8 +562,9 @@ function sendDesktopNotification(title: string, body: string): void {
 
 const SILENCE_MARKER_RE = /^[*_`.~]*(?:\[?SILENT\]?|NO[_\s]REPLY)[*_`.~]*$/i;
 const HERMES_SILENCE_WARNING_RE = /^⚠️?\s*The model returned only a silence marker.*$/i;
-const HERMES_REASONING_CLOSED_RE = /(?:^|\n)[ \t]*💭\s*Reasoning:\s*\n[ \t]*╭[\s\S]*?╰[─━\s]*╯[ \t]*(?=\n|$)/g;
-const HERMES_REASONING_OPEN_RE = /(?:^|\n)[ \t]*💭\s*Reasoning:[\s\S]*$/;
+const HERMES_REASONING_CLOSED_RE =
+  /(?:^|\n)[ \t]*💭\s*[*_~]*Reasoning:?[*_~]*[ \t]*\n(?:[ \t]*╭[\s\S]*?╰[─━\s]*╯|[ \t]*```[\s\S]*?```)[ \t]*(?=\n|$)/g;
+const HERMES_REASONING_OPEN_RE = /(?:^|\n)[ \t]*💭\s*[*_~]*Reasoning:?[*_~]*[\s\S]*$/;
 
 function stripEmbeddedReasoning(rawText: string): string {
   return rawText
@@ -1345,6 +1347,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const [showDetails, setShowDetails] = useState<boolean>(() => initialPersisted.showDetails ?? false);
   const [completedAgentIds, setCompletedAgentIds] = useState<Set<string>>(() => new Set());
   const prevStatusesRef = useRef<Map<string, string>>(new Map());
+  const prevAttentionRef = useRef<Map<string, boolean>>(new Map());
   const timelineCacheRef = useRef<Map<string, CachedSession>>(new Map());
   const draftsRef = useRef<Map<string, Draft>>(new Map());
   const pastedTextsRef = useRef<Map<string, string>>(new Map());
@@ -1539,7 +1542,6 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             nextStatuses.set(a.id, a.status);
           }
           prevStatusesRef.current = nextStatuses;
-          setCompletedAgentIds(new Set());
 
           let chosenId: string | null =
             (activeAgentIdRef.current && list.some((a) => a.id === activeAgentIdRef.current)
@@ -1564,6 +1566,18 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             if (match) chosenId = match.id;
           }
 
+          const nextAttention = new Map<string, boolean>();
+          const initialUnread = new Set<string>();
+          for (const a of list) {
+            const att = Boolean(a.requiresAttention && a.id !== chosenId);
+            nextAttention.set(a.id, att);
+            if (att && a.status !== "running") {
+              initialUnread.add(a.id);
+            }
+          }
+          prevAttentionRef.current = nextAttention;
+          setCompletedAgentIds(initialUnread);
+
           setActiveAgentId(chosenId);
           activeAgentIdRef.current = chosenId;
           if (chosenId) savePersistedState({ lastActiveAgentId: chosenId });
@@ -1587,14 +1601,21 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         if (msg.type === "agents_updated") {
           const list: HermesAgent[] = msg.agents ?? [];
           const prevMap = prevStatusesRef.current;
+          const prevAttMap = prevAttentionRef.current;
           const nextMap = new Map<string, string>();
+          const nextAttMap = new Map<string, boolean>();
           const newlyDone: string[] = [];
           const nowRunning: string[] = [];
+          const clearedAttention: string[] = [];
 
           let activeFinished = false;
           for (const a of list) {
             nextMap.set(a.id, a.status);
             const prevStatus = prevMap.get(a.id);
+            const att = Boolean(a.requiresAttention && a.id !== activeAgentIdRef.current);
+            nextAttMap.set(a.id, att);
+            const prevAtt = prevAttMap.get(a.id) ?? false;
+
             if (a.status === "running") {
               nowRunning.push(a.id);
             } else if (a.id === activeAgentIdRef.current) {
@@ -1605,21 +1626,25 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
               ) {
                 activeFinished = true;
               }
-            } else if (prevStatus === "running") {
+            } else if (prevStatus === "running" || (att && !prevAtt)) {
               newlyDone.push(a.id);
+            } else if (!att && prevAtt) {
+              clearedAttention.push(a.id);
             }
           }
           prevStatusesRef.current = nextMap;
+          prevAttentionRef.current = nextAttMap;
           if (activeFinished) {
             flushLiveTurnToStatic();
             if (activeAgentIdRef.current) {
               sendBridge({ cmd: "reload_timeline", agentId: activeAgentIdRef.current });
             }
           }
-          if (newlyDone.length > 0 || nowRunning.length > 0) {
+          if (newlyDone.length > 0 || nowRunning.length > 0 || clearedAttention.length > 0) {
             setCompletedAgentIds((prev) => {
               const next = new Set(prev);
               for (const id of nowRunning) next.delete(id);
+              for (const id of clearedAttention) next.delete(id);
               for (const id of newlyDone) next.add(id);
               return next;
             });
@@ -1675,7 +1700,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           } else {
             resetToAgentTimeline(active, tl, cmds);
           }
-          setStatusNotice(null);
+          if (!copyTimerRef.current) {
+            setStatusNotice(null);
+          }
           return;
         }
 
@@ -1866,23 +1893,16 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     return merged;
   }, [hermesCommands]);
 
-  const slashSuggestions = useMemo(() => {
-    if (!input.startsWith("/") || input.includes(" ") || modal !== "none") return [];
-    const q = input.slice(1).toLowerCase();
-    const starts = allSlashCommands.filter((c) => c.name.toLowerCase().startsWith(q));
-    const descOnly = allSlashCommands.filter(
-      (c) => !c.name.toLowerCase().startsWith(q) && c.description.toLowerCase().includes(q)
+  const orderedAgents = useMemo(() => {
+    const enriched = agents.map((a) => ({ agent: a, ...getAgentTabGroupAndLabel(a, agents) }));
+    enriched.sort(
+      (x, y) =>
+        x.group.localeCompare(y.group, "fr") ||
+        x.label.localeCompare(y.label, "fr") ||
+        x.agent.id.localeCompare(y.agent.id)
     );
-    return [...starts.sort((a, b) => (a.name.toLowerCase() === q ? -1 : b.name.toLowerCase() === q ? 1 : 0)), ...descOnly].slice(0, 10);
-  }, [input, modal, allSlashCommands]);
-
-  const filteredAgents = useMemo(() => {
-    return agents.filter((a) => fuzzyMatch(modalFilter, `${a.title} ${a.projectName} ${a.workspaceName} ${a.cwd}`));
-  }, [agents, modalFilter]);
-
-  const filteredModels = useMemo(() => {
-    return models.filter((m) => fuzzyMatch(modalFilter, `${m.label} ${m.id}`)).slice(0, 14);
-  }, [models, modalFilter]);
+    return enriched;
+  }, [agents]);
 
   const thinkingChoices = useMemo(() => {
     const activeModelObj = models.find((m) => m.id === activeAgent?.model);
@@ -1906,6 +1926,150 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       { id: "dont_ask", label: "Don't Ask", description: "Auto-allow edits" },
     ];
   }, [activeAgent]);
+
+  const slashSuggestions = useMemo(() => {
+    if (!input.startsWith("/") || modal !== "none") return [];
+    const firstSpace = input.indexOf(" ");
+    if (firstSpace < 0) {
+      const q = input.slice(1).toLowerCase();
+      const starts = allSlashCommands.filter((c) => c.name.toLowerCase().startsWith(q));
+      const descOnly = allSlashCommands.filter(
+        (c) => !c.name.toLowerCase().startsWith(q) && c.description.toLowerCase().includes(q)
+      );
+      return [...starts.sort((a, b) => (a.name.toLowerCase() === q ? -1 : b.name.toLowerCase() === q ? 1 : 0)), ...descOnly].slice(0, 10);
+    }
+
+    const cmdName = input.slice(1, firstSpace).toLowerCase();
+    const argRaw = input.slice(firstSpace + 1);
+    const argQuery = argRaw.trim().toLowerCase();
+
+    if (cmdName === "to" || cmdName === "forward") {
+      const candidates = orderedAgents
+        .filter((x) => x.agent.id !== activeAgentId)
+        .map((x) => {
+          const full = `${x.group} - ${x.label}`;
+          const isUniqueLabel =
+            orderedAgents.filter((y) => y.label.toLowerCase() === x.label.toLowerCase()).length === 1;
+          const token = isUniqueLabel ? x.label : full;
+          return { ...x, full, token, isUniqueLabel };
+        });
+
+      // Once a valid target session is followed by a trailing space, close dropdown so user can type their consigne
+      const argLower = argRaw.toLowerCase();
+      const alreadyCompletedTarget = candidates.some(
+        (c) =>
+          argLower.startsWith(`${c.full.toLowerCase()} `) ||
+          argLower.startsWith(`${c.group.toLowerCase()}-${c.label.toLowerCase()} `) ||
+          (c.isUniqueLabel && argLower.startsWith(`${c.label.toLowerCase()} `))
+      );
+      if (alreadyCompletedTarget) return [];
+
+      return candidates
+        .filter((c) => fuzzyMatch(argQuery, `${c.full} ${c.agent.title}`))
+        .slice(0, 10)
+        .map((c) => ({
+          name: `${cmdName} ${c.token}`,
+          displayName: `/${cmdName} ${c.token}`,
+          argumentHint: "[texte]",
+          description: `Transférer la dernière réponse vers ${c.full}`,
+          isLocal: true,
+          fillValue: `/${cmdName} ${c.token} `,
+          submitOnEnter: true,
+        }));
+    }
+
+    if (cmdName === "sessions" || cmdName === "session" || cmdName === "agent" || cmdName === "agents") {
+      return orderedAgents
+        .filter((x) => fuzzyMatch(argQuery, `${x.group} - ${x.label} ${x.agent.title}`))
+        .slice(0, 10)
+        .map((x) => {
+          const full = `${x.group} - ${x.label}`;
+          const isUnique =
+            orderedAgents.filter((y) => y.label.toLowerCase() === x.label.toLowerCase()).length === 1;
+          const token = isUnique ? x.label : full;
+          return {
+            name: `${cmdName} ${full}`,
+            displayName: `/${cmdName} ${token}`,
+            description: `Basculer sur ${full}${x.agent.id === activeAgentId ? " ★" : ""}`,
+            isLocal: true,
+            fillValue: `/${cmdName} ${full}`,
+            submitOnEnter: true,
+          };
+        });
+    }
+
+    if (cmdName === "thinking") {
+      return thinkingChoices
+        .filter((lvl) => lvl.toLowerCase().includes(argQuery))
+        .map((lvl) => ({
+          name: `thinking ${lvl}`,
+          displayName: `/thinking ${lvl}`,
+          description: `Niveau de raisonnement ${lvl}${lvl === activeAgent?.thinkingOptionId ? " ★" : ""}`,
+          isLocal: true,
+          fillValue: `/thinking ${lvl}`,
+          submitOnEnter: true,
+        }));
+    }
+
+    if (cmdName === "mode") {
+      return modeChoices
+        .filter((m) => fuzzyMatch(argQuery, `${m.id} ${m.label} ${m.description}`))
+        .map((m) => ({
+          name: `mode ${m.id}`,
+          displayName: `/mode ${m.id}`,
+          description: `${m.label} — ${m.description}${m.id === activeAgent?.modeId ? " ★" : ""}`,
+          isLocal: true,
+          fillValue: `/mode ${m.id}`,
+          submitOnEnter: true,
+        }));
+    }
+
+    if (cmdName === "model") {
+      return models
+        .filter((m) => fuzzyMatch(argQuery, `${m.label} ${m.id}`))
+        .slice(0, 10)
+        .map((m) => ({
+          name: `model ${m.id}`,
+          displayName: `/model ${m.id}`,
+          description: `${m.label}${m.id === activeAgent?.model ? " ★" : ""}`,
+          isLocal: true,
+          fillValue: `/model ${m.id}`,
+          submitOnEnter: true,
+        }));
+    }
+
+    if (cmdName === "copy" || cmdName === "cp") {
+      const opts: SlashCommand[] = [
+        {
+          name: `${cmdName}`,
+          displayName: `/${cmdName}`,
+          description: "Copier toute la dernière réponse de l'agent",
+          isLocal: true,
+          fillValue: `/${cmdName}`,
+          submitOnEnter: true,
+        },
+        {
+          name: `${cmdName} code`,
+          displayName: `/${cmdName} code`,
+          description: "Copier uniquement le dernier bloc de code",
+          isLocal: true,
+          fillValue: `/${cmdName} code`,
+          submitOnEnter: true,
+        },
+      ];
+      return opts.filter((o) => !argQuery || "code".includes(argQuery));
+    }
+
+    return [];
+  }, [input, modal, allSlashCommands, orderedAgents, activeAgentId, thinkingChoices, modeChoices, models, activeAgent]);
+
+  const filteredAgents = useMemo(() => {
+    return agents.filter((a) => fuzzyMatch(modalFilter, `${a.title} ${a.projectName} ${a.workspaceName} ${a.cwd}`));
+  }, [agents, modalFilter]);
+
+  const filteredModels = useMemo(() => {
+    return models.filter((m) => fuzzyMatch(modalFilter, `${m.label} ${m.id}`)).slice(0, 14);
+  }, [models, modalFilter]);
 
   function openModal(kind: ModalKind): void {
     setModal(kind);
@@ -1946,6 +2110,8 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     activeAgentIdRef.current = id;
     setActiveAgentId(id);
     savePersistedState({ lastActiveAgentId: id });
+    prevAttentionRef.current.set(id, false);
+    if (prevId) prevAttentionRef.current.set(prevId, false);
     setCompletedAgentIds((prev) => {
       if (!prev.has(id) && !(prevId && prev.has(prevId))) return prev;
       const next = new Set(prev);
@@ -1958,10 +2124,14 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       setStaticItems(cached.entries);
       setHermesCommands(cached.commands.length > 0 ? cached.commands : FALLBACK_HERMES_COMMANDS);
       const stale = target?.status === "running" || Boolean(target?.updatedAt && target.updatedAt !== cached.updatedAt);
-      setStatusNotice(stale ? "Synchronisation…" : null);
+      if (!copyTimerRef.current) {
+        setStatusNotice(stale ? "Synchronisation…" : null);
+      }
     } else {
       setStaticItems([]);
-      setStatusNotice(`Chargement de ${target?.title ?? id}…`);
+      if (!copyTimerRef.current) {
+        setStatusNotice(`Chargement de ${target?.title ?? id}…`);
+      }
     }
     setLiveAssistant("");
     setLiveTools([]);
@@ -1974,12 +2144,108 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     sendBridge({ cmd: "switch_agent", agentId: id });
   }
 
-  function showTransientCopyNotice(notice: string): void {
+  function showTransientCopyNotice(notice: string, durationMs = 2200): void {
     setStatusNotice(notice);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     copyTimerRef.current = setTimeout(() => {
+      copyTimerRef.current = null;
       setStatusNotice((n) => (n === notice ? null : n));
-    }, 2000);
+    }, durationMs);
+  }
+
+  function forwardLatestToSession(rawArg: string): void {
+    const assistantTexts: string[] = [];
+    for (const it of staticItemsRef.current) {
+      if (it.kind === "assistant" && it.text.trim()) {
+        assistantTexts.push(it.text.trim());
+      }
+    }
+    if (liveAssistantRef.current.trim()) {
+      const filtered = filterNoReply(liveAssistantRef.current.replace(/^\n+/, ""));
+      if (!filtered.isSilentOnly && filtered.text.trim()) {
+        assistantTexts.push(filtered.text.trim());
+      }
+    }
+    if (assistantTexts.length === 0) {
+      showTransientCopyNotice("Aucune réponse à transférer dans cette session.");
+      return;
+    }
+
+    const cleanArg = rawArg.trim();
+    if (!cleanArg) {
+      setPrompt("/to ", 4);
+      setSlashIdx(0);
+      return;
+    }
+
+    const candidates = [
+      ...orderedAgents.filter((x) => x.agent.id !== activeAgentId),
+      ...orderedAgents.filter((x) => x.agent.id === activeAgentId),
+    ];
+
+    let matchedTarget: (typeof orderedAgents)[number] | undefined;
+    let consigne = "";
+
+    const prefixEntries: Array<{ prefix: string; item: (typeof orderedAgents)[number] }> = [];
+    for (const item of candidates) {
+      const full = `${item.group} - ${item.label}`;
+      const dash = `${item.group}-${item.label}`;
+      prefixEntries.push({ prefix: full, item });
+      prefixEntries.push({ prefix: dash, item });
+      if (item.agent.title) prefixEntries.push({ prefix: item.agent.title, item });
+      prefixEntries.push({ prefix: item.label, item });
+    }
+    prefixEntries.sort((a, b) => b.prefix.length - a.prefix.length);
+
+    const lowerArg = cleanArg.toLowerCase();
+    for (const { prefix, item } of prefixEntries) {
+      const pLow = prefix.toLowerCase();
+      if (lowerArg === pLow || lowerArg.startsWith(`${pLow} `)) {
+        matchedTarget = item;
+        consigne = cleanArg.slice(prefix.length).trim();
+        break;
+      }
+    }
+
+    if (!matchedTarget) {
+      const [firstWord, ...restWords] = cleanArg.split(/\s+/);
+      matchedTarget = candidates.find((x) =>
+        fuzzyMatch(firstWord, `${x.group} - ${x.label} ${x.agent.title}`)
+      );
+      consigne = restWords.join(" ").trim();
+    }
+
+    if (!matchedTarget) {
+      showTransientCopyNotice(`Session cible introuvable : "${cleanArg}"`);
+      return;
+    }
+
+    const latestReply = assistantTexts[assistantTexts.length - 1];
+    const srcInfo = activeAgent ? getAgentTabGroupAndLabel(activeAgent, agents) : { group: "Session", label: "" };
+    const sourceFull = srcInfo.label ? `${srcInfo.group} - ${srcInfo.label}` : srcInfo.group;
+    const targetFull = `${matchedTarget.group} - ${matchedTarget.label}`;
+    const forwardedBlock = `[Transféré depuis ${sourceFull}]\n${latestReply}`;
+
+    pasteSeqRef.current += 1;
+    const id = pasteSeqRef.current;
+    const lineCount = forwardedBlock.split("\n").length;
+    const tokenLabel = `[Pasted #${id} +${lineCount} lines]`;
+    const promptText = consigne ? `${tokenLabel} ${consigne}` : `${tokenLabel} `;
+
+    const existingDraft = draftsRef.current.get(matchedTarget.agent.id);
+    const nextPasted: Array<[string, string]> = existingDraft
+      ? [...existingDraft.pastedTexts, [tokenLabel, forwardedBlock]]
+      : [[tokenLabel, forwardedBlock]];
+
+    draftsRef.current.set(matchedTarget.agent.id, {
+      text: promptText,
+      cursor: promptText.length,
+      attachments: existingDraft?.attachments ?? [],
+      pastedTexts: nextPasted,
+    });
+
+    showTransientCopyNotice(`↪ Transféré depuis ${sourceFull} vers ${targetFull} (Entrée pour envoyer)`, 3200);
+    switchAgentById(matchedTarget.agent.id);
   }
 
   function copyLatestFromConversation(mode: "auto" | "all" | "code"): void {
@@ -2155,6 +2421,10 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         copyLatestFromConversation(sub === "code" ? "code" : "all");
         return;
       }
+      if (cmdName === "to" || cmdName === "forward") {
+        forwardLatestToSession(arg);
+        return;
+      }
       if (cmdName === "new") {
         const cleanArg = arg.replace(/^["']|["']$/g, "").trim();
         const basePersona =
@@ -2216,9 +2486,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       }
       if (cmdName === "sessions" || cmdName === "session" || cmdName === "agent" || cmdName === "agents") {
         if (arg) {
-          const match = agents.find((a) => fuzzyMatch(arg, `${a.title} ${a.projectName}`));
+          const match = orderedAgents.find((x) =>
+            fuzzyMatch(arg, `${x.group} - ${x.label} ${x.agent.title} ${x.agent.projectName}`)
+          );
           if (match) {
-            switchAgentById(match.id);
+            switchAgentById(match.agent.id);
             return;
           }
         }
@@ -2715,16 +2987,16 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       openModal(modal === "thinking" ? "none" : "thinking");
       return;
     }
-    if (key.ctrl && char === "n" && agents.length > 1) {
-      const idx = agents.findIndex((a) => a.id === activeAgentId);
-      const next = agents[(idx + 1) % agents.length];
-      if (next) switchAgentById(next.id);
+    if (key.ctrl && char === "n" && orderedAgents.length > 1) {
+      const idx = orderedAgents.findIndex((x) => x.agent.id === activeAgentId);
+      const next = orderedAgents[(idx + 1) % orderedAgents.length];
+      if (next) switchAgentById(next.agent.id);
       return;
     }
-    if (key.ctrl && char === "p" && agents.length > 1) {
-      const idx = agents.findIndex((a) => a.id === activeAgentId);
-      const prev = agents[(idx - 1 + agents.length) % agents.length];
-      if (prev) switchAgentById(prev.id);
+    if (key.ctrl && char === "p" && orderedAgents.length > 1) {
+      const idx = orderedAgents.findIndex((x) => x.agent.id === activeAgentId);
+      const prev = orderedAgents[(idx - 1 + orderedAgents.length) % orderedAgents.length];
+      if (prev) switchAgentById(prev.agent.id);
       return;
     }
 
@@ -2838,18 +3110,30 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       if (key.tab) {
         const picked = slashSuggestions[slashIdx] ?? slashSuggestions[0];
         if (picked) {
-          const next = `/${picked.name}${picked.argumentHint ? " " : ""}`;
+          const next = picked.fillValue ?? `/${picked.name}${picked.argumentHint ? " " : ""}`;
           setPrompt(next, next.length);
           setSlashIdx(0);
         }
         return;
       }
       if (key.return) {
-        const isExactCmd = allSlashCommands.some((c) => `/${c.name.toLowerCase()}` === input.toLowerCase());
-        const picked = slashSuggestions[slashIdx];
-        if (!isExactCmd && picked && input !== `/${picked.name}` && picked.isLocal && !picked.argumentHint) {
-          handleSubmitLine(`/${picked.name}`);
+        const picked = slashSuggestions[slashIdx] ?? slashSuggestions[0];
+        if (picked?.submitOnEnter && picked.fillValue) {
+          handleSubmitLine(picked.fillValue.trim());
           return;
+        }
+        const isExactCmd = allSlashCommands.some((c) => `/${c.name.toLowerCase()}` === input.toLowerCase());
+        if (picked && !input.includes(" ")) {
+          if (picked.argumentHint && picked.argumentHint.startsWith("<")) {
+            const next = `/${picked.name} `;
+            setPrompt(next, next.length);
+            setSlashIdx(0);
+            return;
+          }
+          if (!isExactCmd && input !== `/${picked.name}` && picked.isLocal && !picked.argumentHint) {
+            handleSubmitLine(`/${picked.name}`);
+            return;
+          }
         }
       }
     } else {
@@ -3222,9 +3506,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} height={slashHeight} overflow="hidden">
           {slashSuggestions.map((c, idx) => {
             const selected = idx === slashIdx;
+            const cmdLabel = c.displayName ?? `/${c.name}`;
             return (
-              <Text key={c.name} color={selected ? "cyan" : undefined} bold={selected}>
-                {selected ? "▸ " : "  "}/{c.name.padEnd(11)} {c.argumentHint ? `${c.argumentHint.padEnd(10)} ` : "           "}
+              <Text key={c.name} color={selected ? "cyan" : undefined} bold={selected} wrap="truncate-end">
+                {selected ? "▸ " : "  "}
+                {cmdLabel.padEnd(22)} {c.argumentHint ? `${c.argumentHint.padEnd(10)} ` : ""}
                 <Text dimColor>{c.description}</Text>
               </Text>
             );
