@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import { render } from "ink";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
@@ -249,6 +249,90 @@ function findPastedTokenRanges(text: string): Array<{ start: number; end: number
     out.push({ start: m.index, end: m.index + m[0].length, token: m[0] });
   }
   return out;
+}
+
+function moveCursorWordLeft(text: string, pos: number): number {
+  if (pos <= 0) return 0;
+  const tokens = findPastedTokenRanges(text);
+  const directHit = tokens.find((r) => pos > r.start && pos <= r.end);
+  if (directHit) return directHit.start;
+
+  let i = pos;
+  while (i > 0 && /\s/.test(text[i - 1])) i--;
+  if (i <= 0) return 0;
+
+  const afterSpaceHit = tokens.find((r) => i > r.start && i <= r.end);
+  if (afterSpaceHit) return afterSpaceHit.start;
+
+  if (/[\p{L}\p{N}_]/u.test(text[i - 1])) {
+    while (i > 0 && /[\p{L}\p{N}_]/u.test(text[i - 1])) {
+      const tok = tokens.find((r) => i - 1 >= r.start && i - 1 < r.end);
+      if (tok) return tok.start;
+      i--;
+    }
+  } else {
+    while (i > 0 && !/\s/.test(text[i - 1]) && !/[\p{L}\p{N}_]/u.test(text[i - 1])) {
+      const tok = tokens.find((r) => i - 1 >= r.start && i - 1 < r.end);
+      if (tok) return tok.start;
+      i--;
+    }
+  }
+  return i;
+}
+
+function moveCursorWordRight(text: string, pos: number): number {
+  if (pos >= text.length) return text.length;
+  const tokens = findPastedTokenRanges(text);
+  const directHit = tokens.find((r) => pos >= r.start && pos < r.end);
+  if (directHit) return directHit.end;
+
+  let i = pos;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  if (i >= text.length) return text.length;
+
+  const afterSpaceHit = tokens.find((r) => i >= r.start && i < r.end);
+  if (afterSpaceHit) return afterSpaceHit.end;
+
+  if (/[\p{L}\p{N}_]/u.test(text[i])) {
+    while (i < text.length && /[\p{L}\p{N}_]/u.test(text[i])) {
+      const tok = tokens.find((r) => i >= r.start && i < r.end);
+      if (tok) return tok.end;
+      i++;
+    }
+  } else {
+    while (i < text.length && !/\s/.test(text[i]) && !/[\p{L}\p{N}_]/u.test(text[i])) {
+      const tok = tokens.find((r) => i >= r.start && i < r.end);
+      if (tok) return tok.end;
+      i++;
+    }
+  }
+  return i;
+}
+
+function moveCursorVertical(text: string, pos: number, dir: -1 | 1): number | null {
+  if (!text.includes("\n")) return null;
+  const lines = text.split("\n");
+  let offset = 0;
+  let curLine = 0;
+  let col = 0;
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    starts.push(offset);
+    const end = offset + lines[i].length;
+    if (pos >= offset && pos <= end) {
+      curLine = i;
+      col = pos - offset;
+    }
+    offset = end + 1;
+  }
+  const targetLine = curLine + dir;
+  if (targetLine < 0 || targetLine >= lines.length) return null;
+  let targetPos = starts[targetLine] + Math.min(col, lines[targetLine].length);
+  const hit = findPastedTokenRanges(text).find((r) => targetPos > r.start && targetPos < r.end);
+  if (hit) {
+    targetPos = dir < 0 ? hit.start : hit.end;
+  }
+  return targetPos;
 }
 
 function isCodeTopBorder(plain: string): boolean {
@@ -904,6 +988,43 @@ interface TopTabsLayout {
   menuHitBox: { row: number; startCol: number; endCol: number } | null;
 }
 
+function getAgentTabGroupAndLabel(
+  agent: HermesAgent,
+  allAgents?: ReadonlyArray<HermesAgent>
+): { group: string; label: string } {
+  const title = (agent.title || "").trim();
+  const project = (agent.projectName || "").trim();
+  const workspace = (agent.workspaceName || "").trim();
+  const parts = title.split(" - ");
+  const group = project || parts[0]?.trim() || title || "Session";
+
+  const siblingsInWorkspace =
+    allAgents && agent.workspaceId
+      ? allAgents.filter((a) => a.workspaceId === agent.workspaceId).length
+      : 1;
+
+  if (siblingsInWorkspace <= 1 && workspace && workspace.toLowerCase() !== group.toLowerCase()) {
+    return { group, label: workspace };
+  }
+
+  let rawLabel = "";
+  if (parts.length > 1) {
+    if (parts[0].trim().toLowerCase() === group.toLowerCase()) {
+      rawLabel = parts.slice(1).join(" - ").trim();
+    } else {
+      rawLabel = title;
+    }
+  } else if (title && title.toLowerCase() !== group.toLowerCase()) {
+    rawLabel = title;
+  } else if (workspace && workspace.toLowerCase() !== group.toLowerCase() && siblingsInWorkspace <= 1) {
+    rawLabel = workspace;
+  } else {
+    rawLabel = "Principal";
+  }
+
+  return { group, label: rawLabel || "Principal" };
+}
+
 function buildTopTabsLayout(
   agents: HermesAgent[],
   activeAgentId: string | null,
@@ -916,13 +1037,16 @@ function buildTopTabsLayout(
     return { rows: [chalk.dim("Chargement des sessions…")], hitBoxes, menuHitBox: null };
   }
 
-  // Group sessions by persona ("Alfred - Mails" -> group "Alfred", label "Mails")
+  // Group sessions by projectName (falling back to title prefix before " - ")
   const groups: { name: string; icon: string; items: { agent: HermesAgent; label: string }[] }[] = [];
-  const stable = [...agents].sort((x, y) => x.title.localeCompare(y.title, "fr") || x.id.localeCompare(y.id));
-  for (const a of stable) {
-    const [head, ...tail] = a.title.split(" - ");
-    const name = head.trim() || a.title;
-    const rawLabel = tail.join(" - ").trim() || "Principal";
+  const enriched = agents.map((a) => ({ agent: a, ...getAgentTabGroupAndLabel(a, agents) }));
+  enriched.sort(
+    (x, y) =>
+      x.group.localeCompare(y.group, "fr") ||
+      x.label.localeCompare(y.label, "fr") ||
+      x.agent.id.localeCompare(y.agent.id)
+  );
+  for (const { agent: a, group: name, label: rawLabel } of enriched) {
     let g = groups.find((x) => x.name === name);
     if (!g) {
       g = { name, icon: getPersonaIcon(a), items: [] };
@@ -940,28 +1064,49 @@ function buildTopTabsLayout(
 
   groups.forEach((g, gi) => {
     const headPlain = `${g.icon} ${g.name}`;
-    let line = chalk.bold.whiteBright(headPlain) + " ".repeat(Math.max(1, headerWidth - visibleLength(headPlain))) + chalk.dim("│");
-    let width = headerWidth + 1;
-    const reserve = gi === 0 ? menuWidth + 2 : 0;
-    let hidden = 0;
+    const firstPrefix =
+      chalk.bold.whiteBright(headPlain) + " ".repeat(Math.max(1, headerWidth - visibleLength(headPlain))) + chalk.dim("│");
+    const contPrefix = " ".repeat(headerWidth) + chalk.dim("│");
 
-    g.items.forEach((it, ii) => {
+    let line = firstPrefix;
+    let width = headerWidth + 1;
+    let isFirstLineOfGroup = true;
+    let chipsOnCurrentLine = 0;
+
+    const finalizeLine = (appendMenu: boolean) => {
+      if (appendMenu) {
+        const gap = Math.max(1, innerWidth - width - menuWidth);
+        const startCol = 2 + width + gap;
+        line += " ".repeat(gap) + chalk.dim(menuPlain);
+        menuHitBox = { row: rows.length + 1, startCol, endCol: startCol + menuWidth - 1 };
+      }
+      rows.push(line);
+    };
+
+    g.items.forEach((it) => {
       const isCurrent = it.agent.id === activeAgentId;
       const badge = getAgentBadge(it.agent, completedIds);
       const symbol = badge.stateLabel === "working" ? spinner : badge.symbol;
       const label = it.label.length > 22 ? `${it.label.slice(0, 21)}…` : it.label;
       const plain = ` ${symbol} ${label} `;
       const chipWidth = visibleLength(plain);
-      const sepWidth = ii > 0 ? 1 : 0;
-      if (width + sepWidth + chipWidth + reserve > innerWidth) {
-        hidden++;
-        return;
+      const sepWidth = chipsOnCurrentLine > 0 ? 1 : 0;
+      const reserve = gi === 0 && isFirstLineOfGroup ? menuWidth + 2 : 0;
+
+      if (chipsOnCurrentLine > 0 && width + sepWidth + chipWidth + reserve > innerWidth) {
+        finalizeLine(gi === 0 && isFirstLineOfGroup);
+        isFirstLineOfGroup = false;
+        line = contPrefix;
+        width = headerWidth + 1;
+        chipsOnCurrentLine = 0;
       }
-      if (ii > 0) {
+
+      if (chipsOnCurrentLine > 0) {
         line += chalk.dim("│");
         width += 1;
       }
       const dot = badge.hex ? chalk.hex(badge.hex)(symbol) : chalk.dim(symbol);
+      const rowNum = rows.length + 1;
       const startCol = 2 + width;
       if (isCurrent) {
         const dotOnBg = badge.hex ? chalk.bgWhiteBright.hex(badge.hex)(symbol) : chalk.bgWhiteBright.black(symbol);
@@ -970,20 +1115,11 @@ function buildTopTabsLayout(
         line += ` ${dot} ${label} `;
       }
       width += chipWidth;
-      hitBoxes.push({ agentId: it.agent.id, row: gi + 1, startCol, endCol: startCol + chipWidth - 1 });
+      chipsOnCurrentLine += 1;
+      hitBoxes.push({ agentId: it.agent.id, row: rowNum, startCol, endCol: startCol + chipWidth - 1 });
     });
 
-    if (hidden > 0) {
-      line += chalk.dim(` +${hidden}`);
-      width += 2 + String(hidden).length;
-    }
-    if (gi === 0) {
-      const gap = Math.max(1, innerWidth - width - menuWidth);
-      const startCol = 2 + width + gap;
-      line += " ".repeat(gap) + chalk.dim(menuPlain);
-      menuHitBox = { row: 1, startCol, endCol: startCol + menuWidth - 1 };
-    }
-    rows.push(line);
+    finalizeLine(gi === 0 && isFirstLineOfGroup);
   });
 
   return { rows, hitBoxes, menuHitBox };
@@ -1136,6 +1272,19 @@ const SGR_MOUSE_RE = /\[<(\d+);(\d+);(\d+)([Mm])/g;
 const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const stdinCtx = useStdin() as unknown as { internal_eventEmitter?: { on: (ev: string, fn: (d: Buffer | string) => void) => void; removeListener: (ev: string, fn: (d: Buffer | string) => void) => void } };
+  const lastRawKeySeqRef = useRef("");
+  useEffect(() => {
+    const em = stdinCtx?.internal_eventEmitter;
+    if (!em) return;
+    const onRaw = (data: Buffer | string) => {
+      lastRawKeySeqRef.current = typeof data === "string" ? data : data.toString("utf8");
+    };
+    em.on("input", onRaw);
+    return () => {
+      em.removeListener("input", onRaw);
+    };
+  }, [stdinCtx]);
   const { columns: termCols, rows: termRows } = useTerminalSize();
   const initialPersisted = useMemo(() => loadPersistedState(), []);
   const persistedAgentIdRef = useRef<string | null>(initialPersisted.lastActiveAgentId ?? null);
@@ -1300,29 +1449,39 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     setIsThinking(false);
   }
 
-  function resetToAgentTimeline(agent: HermesAgent | undefined, timeline: TimelineItem[], cmds: SlashCommand[]): void {
+  function resetToAgentTimeline(
+    agent: HermesAgent | undefined,
+    timeline: TimelineItem[],
+    cmds: SlashCommand[],
+    preserveScroll = false
+  ): void {
     const nextEpoch = epochRef.current + 1;
     setLiveAssistant("");
     setLiveTools([]);
     setIsStreaming(agent?.status === "running");
     setIsThinking(false);
-    scrollAnchorRef.current = null;
     pendingOptimisticUsersRef.current = [];
-    setScrollOffset(0);
+    if (!preserveScroll) {
+      scrollAnchorRef.current = null;
+      setScrollOffset(0);
+    }
 
     const entries = timelineToStaticEntries(timeline, nextEpoch);
     const resolvedCmds = cmds.length > 0 ? cmds : FALLBACK_HERMES_COMMANDS;
     if (agent?.id) {
+      const existing = timelineCacheRef.current.get(agent.id);
       timelineCacheRef.current.set(agent.id, {
         entries,
-        commands: resolvedCmds,
+        commands: cmds.length > 0 ? cmds : existing?.commands ?? resolvedCmds,
         fingerprint: timelineFingerprint(timeline),
         updatedAt: agent.updatedAt ?? "",
       });
     }
     setSessionEpoch(nextEpoch);
     setStaticItems(entries);
-    setHermesCommands(resolvedCmds);
+    if (cmds.length > 0) {
+      setHermesCommands(resolvedCmds);
+    }
   }
 
   const spinnerActive = connecting || isStreaming || agents.some((a) => a.status === "running");
@@ -1453,6 +1612,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           prevStatusesRef.current = nextMap;
           if (activeFinished) {
             flushLiveTurnToStatic();
+            if (activeAgentIdRef.current) {
+              sendBridge({ cmd: "reload_timeline", agentId: activeAgentIdRef.current });
+            }
           }
           if (newlyDone.length > 0 || nowRunning.length > 0) {
             setCompletedAgentIds((prev) => {
@@ -1520,7 +1682,11 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         if (msg.type === "timeline_reloaded") {
           if (msg.agentId !== activeAgentIdRef.current) return;
           const active = agentsRef.current.find((a) => a.id === msg.agentId);
-          resetToAgentTimeline(active, msg.timeline ?? [], []);
+          const tl: TimelineItem[] = msg.timeline ?? [];
+          const fp = timelineFingerprint(tl);
+          const cached = timelineCacheRef.current.get(msg.agentId);
+          if (cached && cached.fingerprint === fp) return;
+          resetToAgentTimeline(active, tl, [], true);
           return;
         }
 
@@ -1895,6 +2061,40 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     const curText = inputRef.current;
     const pos = cursorRef.current;
     setPrompt(curText.slice(0, pos) + addition + curText.slice(pos), pos + addition.length);
+  }
+
+  function cleanupRemovedPastedTokens(nextText: string): void {
+    for (const token of Array.from(pastedTextsRef.current.keys())) {
+      if (!nextText.includes(token)) {
+        pastedTextsRef.current.delete(token);
+      }
+    }
+  }
+
+  function deletePromptWordBackward(): void {
+    const curText = inputRef.current;
+    const pos = cursorRef.current;
+    if (!curText && attachmentsRef.current.length > 0) {
+      setAttachments((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (pos <= 0) return;
+    const cutAt = moveCursorWordLeft(curText, pos);
+    const nextText = curText.slice(0, cutAt) + curText.slice(pos);
+    cleanupRemovedPastedTokens(nextText);
+    setPrompt(nextText, cutAt);
+    setSlashIdx(0);
+  }
+
+  function deletePromptWordForward(): void {
+    const curText = inputRef.current;
+    const pos = cursorRef.current;
+    if (pos >= curText.length) return;
+    const cutTo = moveCursorWordRight(curText, pos);
+    const nextText = curText.slice(0, pos) + curText.slice(cutTo);
+    cleanupRemovedPastedTokens(nextText);
+    setPrompt(nextText, pos);
+    setSlashIdx(0);
   }
 
   function insertSmartPaste(rawText: string): void {
@@ -2453,8 +2653,20 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         }
         return;
       }
-      if (key.backspace || key.delete) {
-        const nextQ = searchQuery.slice(0, -1);
+      if (key.backspace || key.delete || char === "[127;5u" || char === "[8;5u") {
+        const rawSeq = lastRawKeySeqRef.current;
+        const isWordBack =
+          key.backspace ||
+          key.ctrl ||
+          key.meta ||
+          rawSeq === "\b" ||
+          rawSeq === "\x1b\x7f" ||
+          rawSeq === "\x1b\b" ||
+          char === "[127;5u" ||
+          char === "[8;5u";
+        const nextQ = isWordBack
+          ? searchQuery.slice(0, moveCursorWordLeft(searchQuery, searchQuery.length))
+          : searchQuery.slice(0, -1);
         setSearchQuery(nextQ);
         setSearchMatchIdx(0);
         return;
@@ -2582,12 +2794,22 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       }
 
       if (modal === "agents" || modal === "models") {
-        if (key.backspace || key.delete) {
-          setModalFilter((f) => f.slice(0, -1));
+        if (key.backspace || key.delete || char === "[127;5u" || char === "[8;5u") {
+          const rawSeq = lastRawKeySeqRef.current;
+          const isWordBack =
+            key.backspace ||
+            key.ctrl ||
+            key.meta ||
+            rawSeq === "\b" ||
+            rawSeq === "\x1b\x7f" ||
+            rawSeq === "\x1b\b" ||
+            char === "[127;5u" ||
+            char === "[8;5u";
+          setModalFilter((f) => (isWordBack ? f.slice(0, moveCursorWordLeft(f, f.length)) : f.slice(0, -1)));
           setModalIdx(0);
           return;
         }
-        if (char && !key.ctrl && !key.meta) {
+        if (char && !key.ctrl && !key.meta && !lastRawKeySeqRef.current.startsWith("\x1b[")) {
           setModalFilter((f) => f + char);
           setModalIdx(0);
         }
@@ -2631,14 +2853,26 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         }
       }
     } else {
-      if (key.upArrow && promptHistory.length > 0) {
-        const nextIdx = Math.min(historyIdx + 1, promptHistory.length - 1);
-        setHistoryIdx(nextIdx);
-        const h = promptHistory[nextIdx];
-        setPrompt(h, h.length);
-        return;
+      if (key.upArrow) {
+        const vertPos = moveCursorVertical(inputRef.current, cursorRef.current, -1);
+        if (vertPos !== null) {
+          setPrompt(inputRef.current, vertPos);
+          return;
+        }
+        if (promptHistory.length > 0) {
+          const nextIdx = Math.min(historyIdx + 1, promptHistory.length - 1);
+          setHistoryIdx(nextIdx);
+          const h = promptHistory[nextIdx];
+          setPrompt(h, h.length);
+          return;
+        }
       }
       if (key.downArrow) {
+        const vertPos = moveCursorVertical(inputRef.current, cursorRef.current, 1);
+        if (vertPos !== null) {
+          setPrompt(inputRef.current, vertPos);
+          return;
+        }
         if (historyIdx > 0) {
           const nextIdx = historyIdx - 1;
           setHistoryIdx(nextIdx);
@@ -2652,7 +2886,30 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       }
     }
 
-    // Prompt cursor navigation & editing shortcuts
+    const rawSeq = lastRawKeySeqRef.current;
+
+    // Word-level cursor navigation: Ctrl+Left/Right, Alt+Left/Right (including CSI-u & rxvt sequences)
+    const isWordLeft =
+      (key.leftArrow && (key.ctrl || key.meta)) ||
+      (key.meta && char === "b") ||
+      /^\x1b(?:\[(?:1;[35]D|[35]D|d)|Od|\x1b\[D)$/.test(rawSeq);
+    if (isWordLeft) {
+      const curText = inputRef.current;
+      setPrompt(curText, moveCursorWordLeft(curText, cursorRef.current));
+      return;
+    }
+
+    const isWordRight =
+      (key.rightArrow && (key.ctrl || key.meta)) ||
+      (key.meta && char === "f") ||
+      /^\x1b(?:\[(?:1;[35]C|[35]C|c)|Oc|\x1b\[C)$/.test(rawSeq);
+    if (isWordRight) {
+      const curText = inputRef.current;
+      setPrompt(curText, moveCursorWordRight(curText, cursorRef.current));
+      return;
+    }
+
+    // Character-level cursor navigation
     if (key.leftArrow) {
       const curText = inputRef.current;
       let target = Math.max(0, cursorRef.current - 1);
@@ -2669,19 +2926,28 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       setPrompt(curText, target);
       return;
     }
-    if (char === "[H" || char === "[1~" || char === "OH") {
-      setPrompt(inputRef.current, 0);
+    if (char === "[H" || char === "[1~" || char === "OH" || rawSeq === "\x1b[H" || rawSeq === "\x1bOH" || rawSeq === "\x1b[1~") {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      const lineStart = curText.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
+      setPrompt(curText, pos === lineStart ? 0 : lineStart);
       return;
     }
-    if (char === "[F" || char === "[4~" || char === "OF" || (key.ctrl && char === "e")) {
-      setPrompt(inputRef.current, inputRef.current.length);
+    if (char === "[F" || char === "[4~" || char === "OF" || rawSeq === "\x1b[F" || rawSeq === "\x1bOF" || rawSeq === "\x1b[4~" || (key.ctrl && char === "e")) {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      const nl = curText.indexOf("\n", pos);
+      const lineEnd = nl === -1 ? curText.length : nl;
+      setPrompt(curText, pos === lineEnd ? curText.length : lineEnd);
       return;
     }
     if (key.ctrl && char === "u") {
       const curText = inputRef.current;
       const pos = cursorRef.current;
       const lineStart = curText.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
-      setPrompt(curText.slice(0, lineStart) + curText.slice(pos), lineStart);
+      const nextText = curText.slice(0, lineStart) + curText.slice(pos);
+      cleanupRemovedPastedTokens(nextText);
+      setPrompt(nextText, lineStart);
       return;
     }
     if (key.ctrl && char === "k") {
@@ -2689,28 +2955,32 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       const pos = cursorRef.current;
       const nl = curText.indexOf("\n", pos);
       const lineEnd = nl === -1 ? curText.length : nl;
-      setPrompt(curText.slice(0, pos) + curText.slice(lineEnd), pos);
+      const nextText = curText.slice(0, pos) + curText.slice(lineEnd);
+      cleanupRemovedPastedTokens(nextText);
+      setPrompt(nextText, pos);
       return;
     }
-    if (key.ctrl && char === "w") {
-      const curText = inputRef.current;
-      const pos = cursorRef.current;
-      const before = curText.slice(0, pos);
-      const trimmedRight = before.replace(/\s+$/, "");
-      const tokenHit = findPastedTokenRanges(curText).find(
-        (r) => trimmedRight.length > r.start && trimmedRight.length <= r.end
-      );
-      if (tokenHit) {
-        const nextText = curText.slice(0, tokenHit.start) + curText.slice(pos);
-        if (!nextText.includes(tokenHit.token)) {
-          pastedTextsRef.current.delete(tokenHit.token);
-        }
-        setPrompt(nextText, tokenHit.start);
-        return;
-      }
-      const wordStart = trimmedRight.search(/\S+$/);
-      const cutAt = wordStart >= 0 ? wordStart : 0;
-      setPrompt(curText.slice(0, cutAt) + curText.slice(pos), cutAt);
+
+    // Word-level deletion backward (Ctrl+Backspace, Alt+Backspace, Ctrl+W, Ctrl+H, CSI-u [127;5u / [8;5u)
+    const isCtrlOrAltBackspace =
+      key.backspace ||
+      (key.ctrl && (char === "w" || char === "h")) ||
+      ((key.delete || key.backspace) && (key.ctrl || key.meta) && !rawSeq.startsWith("\x1b[3")) ||
+      rawSeq === "\b" ||
+      rawSeq === "\x1b\x7f" ||
+      rawSeq === "\x1b\b" ||
+      /^\x1b\[(?:127|8);[357]u$/.test(rawSeq);
+    if (isCtrlOrAltBackspace) {
+      deletePromptWordBackward();
+      return;
+    }
+
+    // Forward word deletion (Ctrl+Delete, Alt+Delete, Alt+D)
+    const isForwardWordDelete =
+      (key.meta && char === "d") ||
+      /^\x1b\[3;[357]~$|^\x1b\[3\^$/.test(rawSeq);
+    if (isForwardWordDelete) {
+      deletePromptWordForward();
       return;
     }
 
@@ -2726,7 +2996,26 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
       return;
     }
 
-    if (key.backspace || key.delete) {
+    // Forward single-character/token Delete (Suppr key: \x1b[3~)
+    if (rawSeq === "\x1b[3~") {
+      const curText = inputRef.current;
+      const pos = cursorRef.current;
+      if (pos < curText.length) {
+        const tokenHit = findPastedTokenRanges(curText).find((r) => pos >= r.start && pos < r.end);
+        if (tokenHit) {
+          const nextText = curText.slice(0, tokenHit.start) + curText.slice(tokenHit.end);
+          cleanupRemovedPastedTokens(nextText);
+          setPrompt(nextText, tokenHit.start);
+        } else {
+          setPrompt(curText.slice(0, pos) + curText.slice(pos + 1), pos);
+        }
+      }
+      setSlashIdx(0);
+      return;
+    }
+
+    // Normal Backspace (\x7f)
+    if (key.delete || key.backspace) {
       const curText = inputRef.current;
       const pos = cursorRef.current;
       if (!curText && attachmentsRef.current.length > 0) {
@@ -2737,9 +3026,7 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         const tokenHit = findPastedTokenRanges(curText).find((r) => pos > r.start && pos <= r.end);
         if (tokenHit) {
           const nextText = curText.slice(0, tokenHit.start) + curText.slice(tokenHit.end);
-          if (!nextText.includes(tokenHit.token)) {
-            pastedTextsRef.current.delete(tokenHit.token);
-          }
+          cleanupRemovedPastedTokens(nextText);
           setPrompt(nextText, tokenHit.start);
           setSlashIdx(0);
           return;
@@ -2751,6 +3038,10 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     }
 
     if (char && !key.ctrl && !key.meta) {
+      // Ignore unhandled terminal CSI/SS3 escape sequences so they never leak as text into the prompt
+      if (rawSeq.startsWith("\x1b[") || rawSeq.startsWith("\x1bO")) {
+        return;
+      }
       if (char.length > 3) {
         const pastedPath = normalizePastedPath(char);
         if (pastedPath) {
@@ -2836,11 +3127,13 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
             const selected = idx === modalIdx;
             const current = a.id === activeAgentId;
             const badge = getAgentBadge(a, completedAgentIds);
+            const { group, label } = getAgentTabGroupAndLabel(a, agents);
+            const displayTitle = a.projectName ? `${group} - ${label}` : a.title;
             return (
               <Text key={a.id} color={selected ? "black" : undefined} backgroundColor={selected ? "cyan" : undefined}>
                 {selected ? "▸ " : "  "}
                 {selected ? badge.symbol : renderBadgeDot(badge)}{" "}
-                {a.title.padEnd(22)} [{badge.stateLabel.padEnd(7)}] {(a.model ?? "").split(":").pop()}
+                {displayTitle.padEnd(22)} [{badge.stateLabel.padEnd(7)}] {(a.model ?? "").split(":").pop()}
                 {current ? " ★" : ""}
               </Text>
             );
@@ -3016,7 +3309,14 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
           ^S sessions · ^O expand{showDetails ? "*" : ""} · ^Y copier · ^V coller · ^L model · /
         </Text>
         <Text wrap="truncate-end">
-          <Text color="yellow">{activeAgent?.title ?? "—"}</Text>
+          <Text color="yellow">
+            {activeAgent
+              ? (() => {
+                  const { group, label } = getAgentTabGroupAndLabel(activeAgent, agents);
+                  return `${group} - ${label}`;
+                })()
+              : "—"}
+          </Text>
           <Text dimColor>
             {" "}
             · {(activeAgent?.model ?? "—").split(":").pop()} ({activeAgent?.thinkingOptionId ?? "default"})

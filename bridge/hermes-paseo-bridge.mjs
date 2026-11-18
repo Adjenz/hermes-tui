@@ -119,8 +119,23 @@ async function main() {
   let activeAgentId = null;
   let activeUnsub = null;
   let observeSub = null;
+  let observeWsSub = null;
   let refreshTimer = null;
+  let pollTimer = null;
   const prevStatuses = new Map();
+  const syncedNames = new Set();
+
+  function clearAttentionForAgent(agentId) {
+    if (!agentId) return;
+    const entry = agentsMap.get(agentId);
+    const a = entry ? compactAgent(entry) : null;
+    if (typeof client.clearAgentAttention === "function") {
+      client.clearAgentAttention(agentId).catch(() => {});
+    }
+    if (a?.workspaceId && typeof client.clearWorkspaceAttention === "function") {
+      client.clearWorkspaceAttention(a.workspaceId).catch(() => {});
+    }
+  }
 
   async function loadLastReplyPreview(agentId) {
     try {
@@ -168,12 +183,72 @@ async function main() {
   }
 
   async function refreshAgentsList(emitUpdate = true) {
-    const res = await client.fetchAgents({});
-    const nextMap = new Map();
+    const [res, wsRes] = await Promise.all([
+      client.fetchAgents({}),
+      typeof client.fetchWorkspaces === "function" ? client.fetchWorkspaces({}).catch(() => null) : Promise.resolve(null),
+    ]);
+    const activeWorkspaceIds =
+      wsRes && Array.isArray(wsRes.entries) && wsRes.entries.length > 0
+        ? new Set(wsRes.entries.filter((w) => !w.archivingAt && !w.archivedAt).map((w) => w.id))
+        : null;
+
+    const rawEntries = [];
     for (const entry of res.entries ?? []) {
       const a = compactAgent(entry);
-      if (a.provider === "hermes" && !isArchived(a)) {
-        nextMap.set(a.id, entry);
+      if (a.provider !== "hermes" || isArchived(a)) continue;
+      if (activeWorkspaceIds && a.workspaceId && !activeWorkspaceIds.has(a.workspaceId)) continue;
+      rawEntries.push({ entry, compact: a });
+    }
+
+    const wsCounts = new Map();
+    for (const { compact: a } of rawEntries) {
+      if (a.workspaceId) {
+        wsCounts.set(a.workspaceId, (wsCounts.get(a.workspaceId) ?? 0) + 1);
+      }
+    }
+
+    const nextMap = new Map();
+    for (const { entry, compact: a } of rawEntries) {
+      nextMap.set(a.id, entry);
+
+      // Auto-sync workspaceName <-> agent.title for 1-session-per-workspace setups
+      const proj = (a.projectName || "").trim();
+      const ws = (a.workspaceName || "").trim();
+      const title = (a.title || "").trim();
+      if (proj && a.workspaceId && wsCounts.get(a.workspaceId) === 1) {
+        const prefix = `${proj} - `;
+        if (
+          ws.toLowerCase() === proj.toLowerCase() &&
+          title &&
+          title.toLowerCase() !== proj.toLowerCase() &&
+          title.length <= 40
+        ) {
+          // Agent was created with default folder workspace name ("alfred") but a specific title ("NAS")
+          const cleanTopic = title.toLowerCase().startsWith(prefix.toLowerCase())
+            ? title.slice(prefix.length).trim()
+            : title;
+          const syncKey = `ws:${a.workspaceId}:${cleanTopic}`;
+          if (cleanTopic && !syncedNames.has(syncKey)) {
+            syncedNames.add(syncKey);
+            if (typeof client.setWorkspaceTitle === "function") {
+              client.setWorkspaceTitle(a.workspaceId, cleanTopic).catch(() => {});
+            }
+            const expectedAgentTitle = `${proj} - ${cleanTopic}`;
+            if (title !== expectedAgentTitle && typeof client.updateAgent === "function") {
+              client.updateAgent(a.id, { name: expectedAgentTitle }).catch(() => {});
+            }
+          }
+        } else if (ws && ws.toLowerCase() !== proj.toLowerCase()) {
+          // Workspace has a clean topic name ("NAS", "Mails"...) -> ensure agent title is "<Project> - <Workspace>"
+          const expectedAgentTitle = `${proj} - ${ws}`;
+          const syncKey = `ag:${a.id}:${expectedAgentTitle}`;
+          if (title !== expectedAgentTitle && !syncedNames.has(syncKey)) {
+            syncedNames.add(syncKey);
+            if (typeof client.updateAgent === "function") {
+              client.updateAgent(a.id, { name: expectedAgentTitle }).catch(() => {});
+            }
+          }
+        }
       }
     }
     agentsMap = nextMap;
@@ -307,7 +382,7 @@ async function main() {
   observeSub.subscribe({
     snapshot() {},
     update(msg) {
-      if (msg?.type === "agent_update") {
+      if (msg?.type === "agent_update" || msg?.type === "agent_archived") {
         scheduleRefresh();
       }
     },
@@ -315,6 +390,24 @@ async function main() {
       emit({ type: "error", message: `Observe error: ${err?.message || err}` });
     },
   });
+
+  if (typeof client.observeWorkspaces === "function") {
+    observeWsSub = client.observeWorkspaces({});
+    observeWsSub.subscribe({
+      snapshot() {},
+      update(msg) {
+        if (msg?.type === "workspace_update") {
+          scheduleRefresh();
+        }
+      },
+      error() {},
+    });
+  }
+
+  pollTimer = setInterval(() => {
+    scheduleRefresh();
+  }, 10000);
+  if (typeof pollTimer.unref === "function") pollTimer.unref();
 
   async function handleCommand(msg) {
     const cmd = msg?.cmd;
@@ -329,6 +422,7 @@ async function main() {
       if (requestedId) {
         const target = agents.find((a) => a.id === requestedId);
         void subscribeToAgent(requestedId);
+        clearAttentionForAgent(requestedId);
         [timeline, commands] = await Promise.all([
           loadTimeline(requestedId).catch(() => []),
           loadCommands(requestedId, target?.status),
@@ -351,6 +445,7 @@ async function main() {
       const entry = agentsMap.get(agentId);
       const status = entry ? compactAgent(entry).status : undefined;
       void subscribeToAgent(agentId);
+      clearAttentionForAgent(agentId);
       const hasImmediateCmds = cachedCommandsByAgent.has(agentId) || fallbackCommands.length > 0;
       if (hasImmediateCmds) {
         const timeline = await loadTimeline(agentId).catch(() => []);
@@ -436,7 +531,17 @@ async function main() {
     if (cmd === "archive_agent") {
       const agentId = msg.agentId || activeAgentId;
       if (!agentId) return;
+      const refEntry = agentsMap.get(agentId);
+      const ref = refEntry ? compactAgent(refEntry) : null;
       await client.archiveAgent(agentId);
+      if (ref?.workspaceId && typeof client.archiveWorkspace === "function") {
+        const otherInWs = Array.from(agentsMap.values())
+          .map(compactAgent)
+          .some((a) => a.id !== agentId && a.workspaceId === ref.workspaceId && !isArchived(a));
+        if (!otherInWs) {
+          await client.archiveWorkspace(ref.workspaceId).catch(() => {});
+        }
+      }
       await refreshAgentsList(true);
       emit({ type: "archived", agentId });
       return;
@@ -444,11 +549,23 @@ async function main() {
 
     if (cmd === "rename_agent") {
       const agentId = msg.agentId || activeAgentId;
-      const name = String(msg.name || "").trim();
-      if (!agentId || !name) throw new Error("Missing agentId or name");
-      await client.updateAgent(agentId, { name });
+      const rawName = String(msg.name || "").trim();
+      if (!agentId || !rawName) throw new Error("Missing agentId or name");
+      const refEntry = agentsMap.get(agentId);
+      const ref = refEntry ? compactAgent(refEntry) : null;
+      const proj = (ref?.projectName || "").trim();
+      const prefix = proj ? `${proj} - ` : "";
+      const wsTitle =
+        prefix && rawName.toLowerCase().startsWith(prefix.toLowerCase())
+          ? rawName.slice(prefix.length).trim()
+          : rawName;
+      const agentTitle = proj && wsTitle ? `${proj} - ${wsTitle}` : rawName;
+      await client.updateAgent(agentId, { name: agentTitle });
+      if (ref?.workspaceId && wsTitle && typeof client.setWorkspaceTitle === "function") {
+        await client.setWorkspaceTitle(ref.workspaceId, wsTitle).catch(() => {});
+      }
       await refreshAgentsList(true);
-      emit({ type: "notice", text: `Session renommée → ${name}` });
+      emit({ type: "notice", text: `Session renommée → ${agentTitle}` });
       return;
     }
 
@@ -559,8 +676,11 @@ async function main() {
 
   const cleanup = async () => {
     try {
+      if (pollTimer) clearInterval(pollTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
       if (activeUnsub) activeUnsub();
       if (observeSub) await observeSub.release().catch(() => {});
+      if (observeWsSub) await observeWsSub.release().catch(() => {});
       await client.close().catch(() => {});
     } finally {
       process.exit(0);
