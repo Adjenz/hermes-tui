@@ -310,6 +310,53 @@ function moveCursorWordRight(text: string, pos: number): number {
   return i;
 }
 
+interface PromptRow {
+  text: string;
+  start: number;
+  end: number;
+  first: boolean;
+  lastOfLine: boolean;
+}
+
+/** Splits the prompt into visual rows so long lines wrap instead of overflowing the prompt box. */
+function wrapPromptRows(text: string, width: number): PromptRow[] {
+  const maxW = Math.max(8, width);
+  const rows: PromptRow[] = [];
+  let offset = 0;
+  for (const line of text.split("\n")) {
+    let rowStart = 0;
+    let rowW = 0;
+    let idx = 0;
+    let produced = false;
+    for (const ch of line) {
+      const w = stringWidth(ch) || 0;
+      if (rowW + w > maxW && idx > rowStart) {
+        rows.push({
+          text: line.slice(rowStart, idx),
+          start: offset + rowStart,
+          end: offset + idx,
+          first: !produced,
+          lastOfLine: false,
+        });
+        produced = true;
+        rowStart = idx;
+        rowW = 0;
+      }
+      rowW += w;
+      idx += ch.length;
+    }
+    rows.push({
+      text: line.slice(rowStart),
+      start: offset + rowStart,
+      end: offset + line.length,
+      first: !produced,
+      lastOfLine: true,
+    });
+    offset += line.length + 1;
+  }
+  return rows;
+}
+
 function moveCursorVertical(text: string, pos: number, dir: -1 | 1): number | null {
   if (!text.includes("\n")) return null;
   const lines = text.split("\n");
@@ -2619,8 +2666,9 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
     return [...staticLines, ...live];
   }, [staticLines, liveLines, busy, spinner]);
 
-  const promptLines = useMemo(() => input.split("\n"), [input]);
-  const visiblePromptRows = Math.min(5, Math.max(1, promptLines.length));
+  // Prompt width = terminal - paddingX(2) - "> " prefix(2) - 1 cell reserved for the cursor block
+  const promptRows = useMemo(() => wrapPromptRows(input, termCols - 5), [input, termCols]);
+  const visiblePromptRows = Math.min(5, Math.max(1, promptRows.length));
   const rootHeight = Math.max(12, termRows - 1);
   const hasTopInfoLine = connecting || Boolean(statusNotice) || scrollOffset > 0;
   const topBarHeight = topTabs.rows.length + 1 + (hasTopInfoLine ? 1 : 0); // tab rows + optional info line + borderBottom
@@ -3590,27 +3638,28 @@ const HermesTuiApp: React.FC<AppProps> = ({ initialQuery }) => {
         width="100%"
       >
         {(() => {
-          const linesWithOffsets: Array<{ text: string; start: number; end: number; idx: number }> = [];
-          let offset = 0;
-          promptLines.forEach((lineText, idx) => {
-            linesWithOffsets.push({ text: lineText, start: offset, end: offset + lineText.length, idx });
-            offset += lineText.length + 1;
-          });
-          const cursorLineIdx = linesWithOffsets.find((l) => cursor >= l.start && cursor <= l.end)?.idx ?? linesWithOffsets.length - 1;
-          const startIdx = Math.max(0, Math.min(linesWithOffsets.length - visiblePromptRows, cursorLineIdx - visiblePromptRows + 1));
-          const shown = linesWithOffsets.slice(startIdx, startIdx + visiblePromptRows);
+          let cursorRowIdx = promptRows.findIndex(
+            (r) => cursor >= r.start && (cursor < r.end || (cursor === r.end && r.lastOfLine))
+          );
+          if (cursorRowIdx < 0) cursorRowIdx = promptRows.length - 1;
+          const startIdx = Math.max(
+            0,
+            Math.min(promptRows.length - visiblePromptRows, cursorRowIdx - visiblePromptRows + 1)
+          );
+          const shown = promptRows.slice(startIdx, startIdx + visiblePromptRows);
 
-          return shown.map((l) => {
-            const hasCursor = l.idx === cursorLineIdx;
+          return shown.map((l, i) => {
+            const rowIdx = startIdx + i;
+            const hasCursor = rowIdx === cursorRowIdx;
             const rel = hasCursor ? Math.max(0, Math.min(l.text.length, cursor - l.start)) : -1;
             const before = hasCursor ? l.text.slice(0, rel) : l.text;
             const curChar = hasCursor ? (rel < l.text.length ? chalk.inverse(l.text[rel]) : chalk.cyan("█")) : "";
             const after = hasCursor && rel < l.text.length ? l.text.slice(rel + 1) : "";
-            const prefixStr = (busy ? chalk.bold.yellow : chalk.bold.cyan)(l.idx === 0 ? "> " : "  ");
+            const prefixStr = (busy ? chalk.bold.yellow : chalk.bold.cyan)(rowIdx === 0 ? "> " : "  ");
             const colorPasted = (seg: string) =>
               seg.replace(/(\[Pasted #\d+[^\]]*\])/g, (_, m: string) => chalk.cyan(m));
             return (
-              <Box key={`prompt-line-${l.idx}`} width="100%" height={1}>
+              <Box key={`prompt-row-${rowIdx}`} width="100%" height={1} overflow="hidden">
                 <Text>{`${prefixStr}${colorPasted(before)}${curChar}${colorPasted(after)}`}</Text>
               </Box>
             );
